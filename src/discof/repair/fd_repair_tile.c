@@ -443,6 +443,19 @@ fd_repair_send_request( fd_repair_tile_ctx_t   * repair_tile_ctx,
   ulong tsorig       = fd_frag_meta_ts_comp( fd_tickcount() );
   uint  src_ip4_addr = 0U; /* unknown */
   send_packet( repair_tile_ctx, stem, 1, active->addr.addr, active->addr.port, src_ip4_addr, buf, buflen, tsorig );
+
+  if (slot!=0) {
+  fd_repair_ledger_req_insert(
+                              repair_tile_ctx->repair_ledger,
+                              nonce,
+                              (ulong)now,
+                              recipient,
+                              peer->ip4,
+                              slot,
+                              shred_index,
+                              type
+    );
+  }
 }
 
 static void
@@ -1248,6 +1261,7 @@ unprivileged_init( fd_topo_t *      topo,
   ctx->repair = fd_repair_join( fd_repair_new( ctx->repair, ctx->repair_seed ) );
   ctx->forest = fd_forest_join( fd_forest_new( ctx->forest, tile->repair.slot_max, ctx->repair_seed ) );
   // ctx->fec_repair  = fd_fec_repair_join( fd_fec_repair_new( ctx->fec_repair, ( tile->repair.max_pending_shred_sets + 2 ), tile->repair.shred_tile_cnt,  0 ) );
+  ctx->repair_ledger = fd_repair_ledger_join( fd_repair_ledger_new( ctx->repair_ledger, ctx->repair_seed, 500e6 ) ); /* timeout of 30 seconds */
   ctx->repair_ledger = fd_repair_ledger_join( fd_repair_ledger_new( ctx->repair_ledger, ctx->repair_seed, 1000000000 ) ); /* timeout of 1 second */
   ctx->fec_sigs = fd_fec_sig_join( fd_fec_sig_new( ctx->fec_sigs, 20 ) );
   ctx->reasm = fd_reasm_join( fd_reasm_new( ctx->reasm, 20 ) );

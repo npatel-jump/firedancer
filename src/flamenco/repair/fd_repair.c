@@ -366,7 +366,7 @@ fd_repair_create_inflight_request( fd_repair_t * glob, int type, ulong slot, uin
     dupelem->last_send_time = 0L;
   }
 
-  if( FD_LIKELY( dupelem->last_send_time+(long)40e6  < now ) ) { /* 40ms */
+  if( FD_LIKELY( dupelem->last_send_time+(long)200e6  < now ) ) { /* 40ms */
     dupelem->last_send_time = now;
     dupelem->req_cnt        = FD_REPAIR_NUM_NEEDED_PEERS;
     return 1;
@@ -527,26 +527,32 @@ fd_repair_get_metrics( fd_repair_t * repair ) {
 }
 
 void
-fd_repair_parse_shred_header( uchar const * buffer, fd_repair_ledger_t * repair_ledger, ulong * sz) {
+fd_repair_parse_shred_header( fd_repair_t * repair, uchar * buffer, fd_repair_ledger_t * repair_ledger, ulong * sz) {
   uint nonce = 0;
   uint src_ip4_addr = 0;
-
   if (*sz == FD_SHRED_DATA_HEADER_SZ + FD_IP4_ADDR_SZ + FD_NONCE_SZ) {
     nonce = fd_uint_load_4(buffer + FD_SHRED_DATA_HEADER_SZ + FD_IP4_ADDR_SZ);
-    *sz -= FD_NONCE_SZ;
-  }
-  if (*sz == FD_SHRED_DATA_HEADER_SZ + FD_IP4_ADDR_SZ) {
     src_ip4_addr = fd_uint_load_4(buffer + FD_SHRED_DATA_HEADER_SZ);
-    *sz -= FD_IP4_ADDR_SZ;
+    *sz -= FD_NONCE_SZ + FD_IP4_ADDR_SZ;
   }
   if (nonce != 0) {
+    repair->counter++;
+    FD_LOG_INFO(("Counter: %lu for nonce: %u", repair->counter, nonce));
+  }
     fd_repair_ledger_req_t * req = fd_repair_ledger_req_query(repair_ledger, nonce);
     if (req) {
       fd_repair_ledger_peer_t * peer = fd_repair_ledger_peer_query(repair_ledger, &req->pubkey);
-      fd_repair_ledger_req_remove(repair_ledger, nonce);
-      if (peer) {
-        fd_repair_ledger_peer_update(repair_ledger, &peer->key, (fd_ip4_port_t){ .addr = src_ip4_addr, .port = 0 }, 1, fd_log_wallclock());
-        }
+      if (req && !peer) {
+        FD_LOG_INFO(("Request exists but not a peer"));
       }
+      if (peer) {
+        // FD_LOG_INFO(("Received request from %s", FD_BASE58_ENC_32_ALLOCA(&req->pubkey)));
+        repair->counter++;
+        fd_repair_ledger_peer_update(repair_ledger, &peer->key, (fd_ip4_port_t){ .addr = src_ip4_addr, .port = 0 }, 1, req->timestamp_ns,(ulong)fd_log_wallclock());
+      }
+      fd_repair_ledger_req_remove(repair_ledger, nonce, 1);
+      fd_shred_t * shred = (fd_shred_t *)fd_type_pun( buffer );
+      FD_LOG_INFO(("Response for slot: %lu, shred_idx: %u", shred->slot, shred->idx));
+      // fd_repair_ledger_print_req(repair_ledger);
     }
 }
