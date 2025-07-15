@@ -771,6 +771,8 @@ after_frag( fd_shred_ctx_t *    ctx,
     if (proto == DST_PROTO_REPAIR) {
       nonce = fd_uint_load_4(shred_buffer + shred_buffer_sz - sizeof(uint));
       nonce_exists = 1;
+      fd_shred_t const * shred = fd_shred_parse( shred_buffer, shred_buffer_sz );
+      FD_LOG_INFO(("Nonce: %ui slot: %lu, shred_idx: %u", nonce, shred->slot, shred->idx));
     }
     // shred_buffer += ctx->hdr_sz;
 

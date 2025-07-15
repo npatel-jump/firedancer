@@ -184,8 +184,8 @@ struct __attribute__((aligned(64UL))) fd_repair_ledger_peer {
   fd_ip4_port_t ip4;               /* peer's IP */
   long          last_send;          /* timestamp of last send to peer */
   long          last_recv;          /* timestamp of last receive from peer */
-  ulong         ewma_hr;            /* exponentially weighted moving average hit rate */
-  ulong         ewma_rtt;           /* exponentially weighted moving average RTT */
+  double        ewma_hr;            /* exponentially weighted moving average hit rate */
+  double        ewma_rtt;           /* exponentially weighted moving average RTT */
   ulong         num_inflight_req;   /* number of inflight requests to this peer */
   ulong         peer_list_idx;      /* index of the peer in the peer_list array */
   uint          pong_sent;          /* 1 if pong has been sent to this peer */
@@ -413,13 +413,13 @@ fd_repair_ledger_req_query( fd_repair_ledger_t * repair_ledger, ulong nonce ) {
    Returns 0 on success, -1 if the request was not found. */
 
 int
-fd_repair_ledger_req_remove( fd_repair_ledger_t * repair_ledger, ulong nonce );
+fd_repair_ledger_req_remove( fd_repair_ledger_t * repair_ledger, ulong nonce, int is_recv );
 
 /* fd_repair_ledger_req_expire removes all requests that have timed out based on
    the provided current timestamp.  Returns the number of expired requests. */
 
 ulong
-fd_repair_ledger_req_expire( fd_repair_ledger_t * repair_ledger, ulong current_ns );
+fd_repair_ledger_req_expire( fd_repair_ledger_t * repair_ledger, ulong current_ns, int is_recv );
 
 /* fd_repair_ledger_req_oldest returns the oldest request in the repair_ledger (front of list).
    Returns NULL if the repair_ledger is empty. */
@@ -472,7 +472,7 @@ fd_repair_ledger_peer_query( fd_repair_ledger_t * repair_ledger, fd_pubkey_t con
 /* fd_repair_ledger_peer_remove removes a peer by its pubkey.
    Returns a pointer to the removed peer on success, NULL if the peer was not found. */
 fd_repair_ledger_peer_t *
-fd_repair_ledger_peer_remove( fd_repair_ledger_t * repair_ledger, fd_pubkey_t const * pubkey );
+fd_repair_ledger_peer_remove( fd_repair_ledger_t * repair_ledger, fd_pubkey_t const * pubkey, int is_recv );
 
 /* fd_repair_ledger_peer_update updates a peer by its pubkey.
    Returns a pointer to the peer on success, NULL on failure. */
@@ -481,7 +481,8 @@ fd_repair_ledger_peer_update( fd_repair_ledger_t *        repair_ledger,
                                fd_pubkey_t const *         pubkey,
                                fd_ip4_port_t               ip4,
                                int                         is_recv,
-                               long                        current_time );
+                               ulong                       req_timestamp_ns,
+                               ulong                       current_time );
 
 /* fd_repair_ledger_verify checks that the repair_ledger data structure is internally
    consistent.  Returns 0 on success, -1 on failure. */
@@ -499,6 +500,10 @@ fd_repair_ledger_peer_print( fd_repair_ledger_peer_t * peer );
 
 void
 fd_repair_ledger_select_peers(fd_repair_ledger_t * repair_ledger, uint num_peers, fd_pubkey_t * selected_peers[]);
+
+void
+fd_repair_ledger_print_first_nonce( fd_repair_ledger_t * repair_ledger );
+
 
 FD_PROTOTYPES_END
 

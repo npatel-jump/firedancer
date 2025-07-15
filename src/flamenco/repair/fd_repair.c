@@ -537,22 +537,23 @@ fd_repair_parse_shred_header( fd_repair_t * repair, uchar * buffer, fd_repair_le
   }
   if (nonce != 0) {
     repair->counter++;
-    FD_LOG_INFO(("Counter: %lu for nonce: %u", repair->counter, nonce));
+    // fd_repair_ledger_print_first_nonce(repair_ledger);
   }
     fd_repair_ledger_req_t * req = fd_repair_ledger_req_query(repair_ledger, nonce);
+    if (!req && nonce != 0) {
+      // FD_LOG_INFO(("Request not found for nonce: %u", nonce));
+    }
     if (req) {
       fd_repair_ledger_peer_t * peer = fd_repair_ledger_peer_query(repair_ledger, &req->pubkey);
-      if (req && !peer) {
-        FD_LOG_INFO(("Request exists but not a peer"));
-      }
+
       if (peer) {
+        (void )src_ip4_addr;
         // FD_LOG_INFO(("Received request from %s", FD_BASE58_ENC_32_ALLOCA(&req->pubkey)));
-        repair->counter++;
-        fd_repair_ledger_peer_update(repair_ledger, &peer->key, (fd_ip4_port_t){ .addr = src_ip4_addr, .port = 0 }, 1, req->timestamp_ns,(ulong)fd_log_wallclock());
+        // fd_repair_ledger_peer_update(repair_ledger, &peer->key, (fd_ip4_port_t){ .addr = src_ip4_addr, .port = 0 }, 1, req->timestamp_ns,  (ulong)fd_log_wallclock());
       }
       fd_repair_ledger_req_remove(repair_ledger, nonce, 1);
       fd_shred_t * shred = (fd_shred_t *)fd_type_pun( buffer );
-      FD_LOG_INFO(("Response for slot: %lu, shred_idx: %u", shred->slot, shred->idx));
-      // fd_repair_ledger_print_req(repair_ledger);
+      FD_LOG_INFO(("Counter: %lu, nonce: %u, Response for slot: %lu, shred_idx: %u", repair->counter, nonce, shred->slot, shred->idx));
+      // fd_repair_ledger_print(repair_ledger);
     }
 }

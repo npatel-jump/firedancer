@@ -103,7 +103,7 @@ test_repair_ledger_peer_basic( fd_wksp_t * wksp ) {
   FD_TEST( test->num_inflight_req == 0UL );
   
   /* removing peers */
-  fd_repair_ledger_peer_t * remove_result = fd_repair_ledger_peer_remove( ledger, &peer1_key );
+  fd_repair_ledger_peer_t * remove_result = fd_repair_ledger_peer_remove( ledger, &peer1_key, 1);
   FD_TEST( remove_result != NULL );
   FD_TEST( fd_repair_ledger_peer_cnt( ledger ) == 1UL );
   
@@ -112,7 +112,7 @@ test_repair_ledger_peer_basic( fd_wksp_t * wksp ) {
   FD_TEST( !removed );
   
   /* removing non-existent peer */
-  fd_repair_ledger_peer_t * remove_result2 = fd_repair_ledger_peer_remove( ledger, &nonexistent_key );
+  fd_repair_ledger_peer_t * remove_result2 = fd_repair_ledger_peer_remove( ledger, &nonexistent_key, 1);
   FD_TEST( remove_result2 == NULL );
   
   /* cleanup */
@@ -190,7 +190,7 @@ test_repair_ledger_req_basic( fd_wksp_t * wksp ) {
   FD_TEST( newest->nonce == nonce2 ); /* Last inserted should be newest */
   
   /* removing requests */
-  int remove_result = fd_repair_ledger_req_remove( ledger, nonce1 );
+  int remove_result = fd_repair_ledger_req_remove( ledger, nonce1, 1);
   FD_TEST( remove_result == 0 );
   FD_TEST( fd_repair_ledger_req_cnt( ledger ) == 1UL );
   
@@ -199,7 +199,7 @@ test_repair_ledger_req_basic( fd_wksp_t * wksp ) {
   FD_TEST( !removed );
   
   /* removing non-existent request */
-  int remove_result2 = fd_repair_ledger_req_remove( ledger, 99999UL );
+  int remove_result2 = fd_repair_ledger_req_remove( ledger, 99999UL, 1);
   FD_TEST( remove_result2 == -1 );
   
   /* cleanup */
@@ -246,7 +246,7 @@ test_repair_ledger_req_expire( fd_wksp_t * wksp ) {
   
   /* Test expiration at a time that should expire first two requests */
   ulong expire_time = base_time + 2000000000UL; /* 2 seconds after base_time */
-  ulong expired_count = fd_repair_ledger_req_expire( ledger, expire_time );
+  ulong expired_count = fd_repair_ledger_req_expire( ledger, expire_time, 1);
   
   FD_TEST( expired_count == 2UL );
   FD_TEST( fd_repair_ledger_req_cnt( ledger ) == 1UL );
@@ -257,18 +257,18 @@ test_repair_ledger_req_expire( fd_wksp_t * wksp ) {
   FD_TEST( fd_repair_ledger_req_query( ledger, nonce3 ) );
   
   /* Test expiration when no requests should expire */
-  ulong no_expire_count = fd_repair_ledger_req_expire( ledger, expire_time );
+  ulong no_expire_count = fd_repair_ledger_req_expire( ledger, expire_time, 1);
   FD_TEST( no_expire_count == 0UL );
   FD_TEST( fd_repair_ledger_req_cnt( ledger ) == 1UL );
   
   /* Test expiration that removes all remaining requests */
   ulong expire_all_time = base_time + 3000000000UL; /* 3 seconds after base_time */
-  ulong all_expired_count = fd_repair_ledger_req_expire( ledger, expire_all_time );
+  ulong all_expired_count = fd_repair_ledger_req_expire( ledger, expire_all_time, 1);
   FD_TEST( all_expired_count == 1UL );
   FD_TEST( fd_repair_ledger_req_cnt( ledger ) == 0UL );
   
   /* Test expiration on empty ledger */
-  ulong empty_expire_count = fd_repair_ledger_req_expire( ledger, expire_all_time );
+  ulong empty_expire_count = fd_repair_ledger_req_expire( ledger, expire_all_time, 1);
   FD_TEST( empty_expire_count == 0UL );
   
   /* Cleanup */
@@ -327,20 +327,20 @@ test_repair_ledger_peer_update( fd_wksp_t * wksp ) {
   
   /* Test updating peer receive */
   long update_time = current_time + 1000000L;
-  fd_repair_ledger_peer_t * updated_peer = fd_repair_ledger_peer_update( ledger, &peer_key, peer_ip, 1, update_time );
+  fd_repair_ledger_peer_t * updated_peer = fd_repair_ledger_peer_update( ledger, &peer_key, peer_ip, 1, (ulong)update_time, (ulong)current_time );
   FD_TEST( updated_peer );
   FD_TEST( updated_peer == peer );
   FD_TEST( updated_peer->last_recv == update_time );
   
   /* Test updating peer send */
   long send_time = update_time + 1000000L;
-  fd_repair_ledger_peer_t * sent_peer = fd_repair_ledger_peer_update( ledger, &peer_key, peer_ip, 0, send_time );
+  fd_repair_ledger_peer_t * sent_peer = fd_repair_ledger_peer_update( ledger, &peer_key, peer_ip, 0, (ulong)send_time, (ulong)current_time );
   FD_TEST( sent_peer );
   FD_TEST( sent_peer == peer );
   
   /* Test updating on onon-existent peer */
   fd_pubkey_t nonexistent_key = make_pubkey( 99 );
-  fd_repair_ledger_peer_t * not_found = fd_repair_ledger_peer_update( ledger, &nonexistent_key, peer_ip, 1, send_time );
+  fd_repair_ledger_peer_t * not_found = fd_repair_ledger_peer_update( ledger, &nonexistent_key, peer_ip, 1, (ulong)send_time, (ulong)current_time );
   FD_TEST( !not_found );
   
   /* Cleanup */

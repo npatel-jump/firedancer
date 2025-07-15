@@ -417,18 +417,6 @@ fd_repair_send_request( fd_repair_tile_ctx_t   * repair_tile_ctx,
   if (!peer) return;
 
   ulong nonce = glob->next_nonce;
-  fd_repair_ledger_req_insert(
-                            repair_tile_ctx->repair_ledger,
-                            nonce,
-                            (ulong)now,
-                            recipient,
-                             peer->ip4,
-                            slot,
-                            shred_index,
-                            type
-  );
-
-
   
   fd_repair_protocol_t protocol;
   fd_repair_construct_request_protocol( glob, &protocol, type, slot, shred_index, recipient, glob->next_nonce, now );
@@ -455,6 +443,7 @@ fd_repair_send_request( fd_repair_tile_ctx_t   * repair_tile_ctx,
                               shred_index,
                               type
     );
+    FD_LOG_INFO(("Insert req to peer: %s, nonce: %lu, slot: %lu, shred_idx: %u, type: %u", FD_BASE58_ENC_32_ALLOCA(recipient), nonce, slot, shred_index, type));
   }
 }
 
@@ -801,7 +790,7 @@ after_frag( fd_repair_tile_ctx_t * ctx,
             ulong                  seq    FD_PARAM_UNUSED,
             ulong                  sig    FD_PARAM_UNUSED,
             ulong                  sz,
-            ulong                  tsorig,
+            ulong                  tsorig FD_PARAM_UNUSED,
             ulong                  tspub  FD_PARAM_UNUSED,
             fd_stem_context_t *    stem ) {
 
@@ -826,7 +815,7 @@ after_frag( fd_repair_tile_ctx_t * ctx,
        must be the case if we have received a frag from shred, because
        shred requires stake weights, which implies a genesis or snapshot
        slot has been loaded. */
-    fd_repair_parse_shred_header( ctx->buffer, ctx->repair_ledger, &sz );
+    fd_repair_parse_shred_header( ctx->repair, ctx->buffer, ctx->repair_ledger, &sz );
 
     ulong wmark = fd_fseq_query( ctx->wmark );
     if( FD_UNLIKELY( fd_forest_root_slot( ctx->forest ) == ULONG_MAX ) ) {
@@ -988,7 +977,7 @@ after_credit( fd_repair_tile_ctx_t * ctx,
      doing any work. */
   *charge_busy = 1;
 
-  fd_repair_ledger_req_expire(ctx->repair_ledger, (ulong)fd_log_wallclock());
+  fd_repair_ledger_req_expire(ctx->repair_ledger, (ulong)fd_log_wallclock(), 0);
 
 
   if( FD_UNLIKELY( ctx->forest->root == ULONG_MAX ) ) return;
@@ -1261,8 +1250,7 @@ unprivileged_init( fd_topo_t *      topo,
   ctx->repair = fd_repair_join( fd_repair_new( ctx->repair, ctx->repair_seed ) );
   ctx->forest = fd_forest_join( fd_forest_new( ctx->forest, tile->repair.slot_max, ctx->repair_seed ) );
   // ctx->fec_repair  = fd_fec_repair_join( fd_fec_repair_new( ctx->fec_repair, ( tile->repair.max_pending_shred_sets + 2 ), tile->repair.shred_tile_cnt,  0 ) );
-  ctx->repair_ledger = fd_repair_ledger_join( fd_repair_ledger_new( ctx->repair_ledger, ctx->repair_seed, 500e6 ) ); /* timeout of 30 seconds */
-  ctx->repair_ledger = fd_repair_ledger_join( fd_repair_ledger_new( ctx->repair_ledger, ctx->repair_seed, 1000000000 ) ); /* timeout of 1 second */
+  ctx->repair_ledger = fd_repair_ledger_join( fd_repair_ledger_new( ctx->repair_ledger, ctx->repair_seed, 10000e6 ) ); /* timeout of 10 seconds */
   ctx->fec_sigs = fd_fec_sig_join( fd_fec_sig_new( ctx->fec_sigs, 20 ) );
   ctx->reasm = fd_reasm_join( fd_reasm_new( ctx->reasm, 20 ) );
   ctx->fec_chainer = fd_fec_chainer_join( fd_fec_chainer_new( ctx->fec_chainer, 1 << 20, 0 ) );

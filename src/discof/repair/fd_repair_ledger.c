@@ -57,6 +57,7 @@ fd_repair_ledger_new( void * shmem, ulong seed, ulong timeout_ns ) {
   repair_ledger->req_expired_cnt   = 0UL;
   repair_ledger->req_handled_cnt   = 0UL;
   repair_ledger->peer_cnt          = 0UL;
+  repair_ledger->pubkeys_idx       = 0UL;
 
   /* Initialize peer pubkeys array */
   memset( repair_ledger->peer_pubkeys, 0, sizeof(repair_ledger->peer_pubkeys) );
@@ -215,7 +216,7 @@ fd_repair_ledger_req_insert( fd_repair_ledger_t *        repair_ledger,
 }
 
 int
-fd_repair_ledger_req_remove( fd_repair_ledger_t * repair_ledger, ulong nonce ) {
+fd_repair_ledger_req_remove( fd_repair_ledger_t * repair_ledger, ulong nonce, int is_recv ) {
 
   if( FD_UNLIKELY( !repair_ledger ) ) {
     FD_LOG_WARNING(( "NULL repair_ledger" ));
@@ -239,23 +240,35 @@ fd_repair_ledger_req_remove( fd_repair_ledger_t * repair_ledger, ulong nonce ) {
     return -1;
   }
 
+  fd_repair_ledger_peer_t * peer = fd_repair_ledger_peer_query( repair_ledger, &req->pubkey );
+  if( FD_UNLIKELY( !peer ) ) {
+    FD_LOG_WARNING(( "peer not found" ));
+    return -1;
+  }
+
+  fd_repair_ledger_peer_update( repair_ledger, &peer->key, peer->ip4, is_recv, req->timestamp_ns,  (ulong)fd_log_wallclock());
+
   // ulong req_idx = fd_repair_ledger_req_pool_idx( req_pool, req );
   fd_repair_ledger_req_dlist_t * dlist = fd_repair_ledger_req_dlist( repair_ledger );
   fd_repair_ledger_req_dlist_ele_remove( dlist, req, req_pool );
 
   /* Remove from map */
   fd_repair_ledger_req_map_ele_remove( req_map, &nonce, NULL, req_pool );
-
   fd_repair_ledger_req_pool_ele_release( req_pool, req );
 
-  repair_ledger->req_cnt--;
-  repair_ledger->req_handled_cnt++;
+
+
+  if (is_recv) {
+    repair_ledger->req_handled_cnt++;
+  } else {
+    repair_ledger->req_expired_cnt++;
+  }
 
   return 0;
 }
 
 ulong
-fd_repair_ledger_req_expire( fd_repair_ledger_t * repair_ledger, ulong current_ns ) {
+fd_repair_ledger_req_expire( fd_repair_ledger_t * repair_ledger, ulong current_ns, int is_recv ) {
 
   if( FD_UNLIKELY( !repair_ledger ) ) {
     FD_LOG_WARNING(( "NULL repair_ledger" ));
@@ -270,7 +283,7 @@ fd_repair_ledger_req_expire( fd_repair_ledger_t * repair_ledger, ulong current_n
   #endif
 
   fd_repair_ledger_req_dlist_t * dlist    = fd_repair_ledger_req_dlist( repair_ledger );
-  fd_repair_ledger_req_map_t *   req_map  = fd_repair_ledger_req_map( repair_ledger );
+  // fd_repair_ledger_req_map_t *   req_map  = fd_repair_ledger_req_map( repair_ledger );
   fd_repair_ledger_req_t *       req_pool = fd_repair_ledger_req_pool( repair_ledger );
   ulong                        expired_cnt = 0UL;
 
@@ -284,24 +297,16 @@ fd_repair_ledger_req_expire( fd_repair_ledger_t * repair_ledger, ulong current_n
       /* This and all subsequent requests are not expired yet */
       break;
     }
-
-    fd_repair_ledger_peer_t * peer = fd_repair_ledger_peer_query( repair_ledger, &req->pubkey );
-    if( peer ) {
-      peer->ewma_hr = (ulong)((double)peer->ewma_hr * 0.9) + (ulong)((double)(0) * 0.1);
-      peer->num_inflight_req--;
-    }
-
+    
     /* Advance iterator before removing */
     iter = fd_repair_ledger_req_dlist_iter_fwd_next( iter, dlist, req_pool );
 
+    fd_repair_ledger_req_remove( repair_ledger, req->nonce, is_recv );
+
+
     /* Remove expired request */
-    fd_repair_ledger_req_dlist_ele_remove( dlist, req, req_pool );
-    fd_repair_ledger_req_map_ele_remove( req_map, &req->nonce, NULL, req_pool );
-    fd_repair_ledger_req_pool_ele_release( req_pool, req );
 
     expired_cnt++;
-    repair_ledger->req_cnt--;
-    repair_ledger->req_expired_cnt++;
   }
 
   return expired_cnt;
@@ -355,7 +360,7 @@ fd_repair_ledger_print( fd_repair_ledger_t const * repair_ledger ) {
     return;
   }
 
-  FD_LOG_NOTICE(( "Peer count: %lu, magic: 0x%lx", repair_ledger->peer_cnt, repair_ledger->magic ));
+  FD_LOG_INFO(("Peer req_cnt: %lu, req_expired_cnt: %lu, req_handled_cnt: %lu", repair_ledger->req_cnt, repair_ledger->req_expired_cnt, repair_ledger->req_handled_cnt));
 }
 
 fd_repair_ledger_peer_t *
@@ -420,7 +425,8 @@ fd_repair_ledger_peer_update( fd_repair_ledger_t *        repair_ledger,
                                fd_pubkey_t const *         pubkey,
                                fd_ip4_port_t               ip4,
                                int                         is_recv,
-                               long                        current_time ) {
+                               ulong                       req_timestamp_ns,
+                               ulong                        current_time ) {
   if( FD_UNLIKELY( !repair_ledger || !pubkey ) ) {
     FD_LOG_WARNING(( "NULL repair_ledger or pubkey" ));
     return NULL;
@@ -433,35 +439,46 @@ fd_repair_ledger_peer_update( fd_repair_ledger_t *        repair_ledger,
   fd_repair_ledger_peer_t * existing = fd_repair_ledger_peer_map_ele_query( peer_map, pubkey, NULL, peer_pool );
   if( existing ) {
     existing->ip4 = ip4;
-    existing->last_recv = current_time;
-    existing->ewma_hr = (ulong)((double)existing->ewma_hr * 0.9) + (ulong)((double)(is_recv ? 1 : 0) * 0.1);
-    existing->ewma_rtt = (ulong)((double)existing->ewma_rtt * 0.9) + (ulong)((double)(current_time - existing->last_send) * 0.1);
-    if (is_recv) { existing->num_inflight_req++; } else { existing->num_inflight_req--; }
-    // FD_LOG_NOTICE(("Peer updated to last_send: %ld, last_recv: %ld, ewma_hr: %lu, ewma_rtt: %lu, num_inflight_req: %lu", existing->last_send, existing->last_recv, existing->ewma_hr, existing->ewma_rtt, existing->num_inflight_req));
+    // existing->last_recv = current_time;
+    existing->ewma_hr = (double)existing->ewma_hr * 0.9 + (double)(is_recv ? 1 : 0) * 0.1;
+    if (is_recv) {
+      existing->ewma_rtt = (double)existing->ewma_rtt * 0.9 + (double)(current_time - req_timestamp_ns) * 0.1;
+    }
+    existing->num_inflight_req--;
+
+    // FD_LOG_INFO(("Peer: %s, recv: %d, ewma_hr: %f, ewma_rtt: %f, num_inflight_req: %lu, sent: %lu, recv: %lu", FD_BASE58_ENC_32_ALLOCA(&existing->key), is_recv, existing->ewma_hr, existing->ewma_rtt, existing->num_inflight_req, req_timestamp_ns, current_time));
     return existing;
   }
   return NULL;
 }
 
 fd_repair_ledger_peer_t *
-fd_repair_ledger_peer_remove( fd_repair_ledger_t * repair_ledger, fd_pubkey_t const * pubkey ) {
+fd_repair_ledger_peer_remove( fd_repair_ledger_t * repair_ledger, fd_pubkey_t const * pubkey, int is_recv ) {
   fd_repair_ledger_peer_map_t * peer_map  = fd_repair_ledger_peer_map( repair_ledger );
   fd_repair_ledger_peer_t *     peer_pool = fd_repair_ledger_peer_pool( repair_ledger );
   fd_repair_ledger_peer_t *     peer = fd_repair_ledger_peer_map_ele_remove( peer_map, (void *)pubkey, NULL, peer_pool );
   if( peer ) {
     repair_ledger->peer_cnt--;
+    
     repair_ledger->peer_pubkeys[peer->peer_list_idx] = repair_ledger->peer_pubkeys[repair_ledger->peer_cnt];
     fd_repair_ledger_peer_t * peer_to_swap = fd_repair_ledger_peer_query( repair_ledger, &repair_ledger->peer_pubkeys[repair_ledger->peer_cnt] );
     peer_to_swap->peer_list_idx = peer->peer_list_idx;
     repair_ledger->peer_pubkeys[repair_ledger->peer_cnt] = (fd_pubkey_t){0};
-    repair_ledger->pubkeys_idx--;
+    
+    // repair_ledger->pubkeys_idx--;
+
+    if (is_recv) {
+      repair_ledger->req_expired_cnt++;
+    } else {  
+      repair_ledger->req_handled_cnt++;
+    }
   }
   return peer;
 }
 
 void
 fd_repair_ledger_peer_print( fd_repair_ledger_peer_t * peer ) {
-  FD_LOG_NOTICE(("Peer: %s, IP: "FD_IP4_ADDR_FMT", last_send: %ld, last_recv: %ld, ewma_hr: %lu, ewma_rtt: %lu, num_inflight_req: %lu", 
+  FD_LOG_NOTICE(("Peer: %s, IP: "FD_IP4_ADDR_FMT", last_send: %ld, last_recv: %ld, ewma_hr: %f, ewma_rtt: %f, num_inflight_req: %lu", 
                  FD_BASE58_ENC_32_ALLOCA(&peer->key), FD_IP4_ADDR_FMT_ARGS(peer->ip4.addr), peer->last_send, peer->last_recv, peer->ewma_hr, peer->ewma_rtt, peer->num_inflight_req));
 }
 
@@ -479,4 +496,14 @@ fd_repair_ledger_select_peers(fd_repair_ledger_t * repair_ledger, uint num_peers
   }
 }
 
+
 // HELPERS
+
+
+//fd logs the first nonce in the dlist
+void
+fd_repair_ledger_print_first_nonce( fd_repair_ledger_t * repair_ledger ) {
+  fd_repair_ledger_req_dlist_t * dlist = fd_repair_ledger_req_dlist( repair_ledger );
+  fd_repair_ledger_req_t * req = fd_repair_ledger_req_dlist_iter_ele( fd_repair_ledger_req_dlist_iter_fwd_init( dlist, fd_repair_ledger_req_pool( repair_ledger ) ), dlist, fd_repair_ledger_req_pool( repair_ledger ) );
+  FD_LOG_INFO(("First nonce: %lu", req->nonce));
+}
