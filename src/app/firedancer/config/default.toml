@@ -284,6 +284,14 @@ user = ""
     # setting.
     max_database_transactions = 2048
 
+# This section configures the repair ledger which tracks outstanding
+# repair requests and peer information for the repair protocol.
+[recorder]
+    # The timeout in nanoseconds for outstanding repair requests.
+    # When a repair request exceeds this timeout, it is considered
+    # expired and will be removed from tracking.  Default is 1 second.
+    timeout_ns = 1_000_000_000
+
 [runtime]
     # Specifies the size in gigibytes of the runtime heap allocator.
     #

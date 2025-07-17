@@ -94,6 +94,18 @@ setup_topo_txncache( fd_topo_t *  topo,
 }
 
 fd_topo_obj_t *
+setup_topo_recorder( fd_topo_t *  topo,
+                          char const * wksp_name,
+                          ulong        timeout_ns ) {
+  fd_topo_obj_t * obj = fd_topob_obj( topo, "recorder", wksp_name );
+  ulong seed;
+  FD_TEST( sizeof(ulong) == getrandom( &seed, sizeof(ulong), 0 ) );
+  FD_TEST( fd_pod_insertf_ulong( topo->props, seed,       "obj.%lu.seed",       obj->id ) );
+  FD_TEST( fd_pod_insertf_ulong( topo->props, timeout_ns, "obj.%lu.timeout_ns", obj->id ) );
+  return obj;
+}
+
+fd_topo_obj_t *
 setup_topo_funk( fd_topo_t *  topo,
                  char const * wksp_name,
                  ulong        max_account_records,
@@ -334,6 +346,7 @@ fd_topo_initialize( config_t * config ) {
   fd_topob_wksp( topo, "writer_fseq" );
   fd_topob_wksp( topo, "funk" );
   fd_topob_wksp( topo, "slot_fseqs"  ); /* fseqs for marked slots eg. turbine slot */
+  fd_topob_wksp( topo, "recorder" );
   if( enable_rpc ) fd_topob_wksp( topo, "rpcsrv" );
 
   #define FOR(cnt) for( ulong i=0UL; i<cnt; i++ )
@@ -524,6 +537,16 @@ fd_topo_initialize( config_t * config ) {
   FOR(exec_tile_cnt) fd_topob_tile_uses( topo, &topo->tiles[ fd_topo_find_tile( topo, "exec", i ) ], runtime_pub_obj, FD_SHMEM_JOIN_MODE_READ_ONLY );
   FOR(writer_tile_cnt) fd_topob_tile_uses( topo, &topo->tiles[ fd_topo_find_tile( topo, "writer", i ) ], runtime_pub_obj, FD_SHMEM_JOIN_MODE_READ_WRITE );
   FD_TEST( fd_pod_insertf_ulong( topo->props, runtime_pub_obj->id, "runtime_pub" ) );
+
+  /* Setup a shared wksp object for recorder. */
+
+  fd_topo_obj_t * recorder_obj = setup_topo_recorder( topo, "recorder",   config->firedancer.recorder.timeout_ns /* 1 second timeout */);
+  fd_topob_tile_uses( topo, repair_tile, recorder_obj, FD_SHMEM_JOIN_MODE_READ_WRITE );
+  if( config->tiles.shredcap.enabled ) {
+    fd_topo_tile_t * shredcap_tile = &topo->tiles[ fd_topo_find_tile( topo, "shrdcp", 0UL ) ];
+    fd_topob_tile_uses( topo, shredcap_tile, recorder_obj, FD_SHMEM_JOIN_MODE_READ_WRITE );
+  }
+  FD_TEST( fd_pod_insertf_ulong( topo->props, recorder_obj->id, "recorder" ) );
 
   /* Create a txncache to be used by replay. */
   fd_topo_obj_t * txncache_obj = setup_topo_txncache( topo, "tcache",

@@ -762,21 +762,6 @@ after_frag( fd_shred_ctx_t *    ctx,
     uchar * shred_buffer    = ctx->shred_buffer;
     ulong   shred_buffer_sz = ctx->shred_buffer_sz;
 
-    fd_ip4_udp_hdrs_t * hdr  = (fd_ip4_udp_hdrs_t *)shred_buffer;
-    uint src_ip4_addr = hdr->ip4->saddr;
-    uint nonce_exists = 0;
-    uint nonce = 0;
-
-    ulong proto = fd_disco_netmux_sig_proto( sig );
-    if (proto == DST_PROTO_REPAIR) {
-      nonce = fd_uint_load_4(shred_buffer + shred_buffer_sz - sizeof(uint));
-      nonce_exists = 1;
-      fd_shred_t const * shred = fd_shred_parse( shred_buffer, shred_buffer_sz );
-      FD_LOG_INFO(("Nonce: %ui slot: %lu, shred_idx: %u", nonce, shred->slot, shred->idx));
-    }
-    // shred_buffer += ctx->hdr_sz;
-
-
     fd_shred_t const * shred = fd_shred_parse( shred_buffer, shred_buffer_sz );
 
     if( FD_UNLIKELY( !shred       ) ) { ctx->metrics->shred_processing_result[ 1 ]++; return; }
@@ -861,17 +846,7 @@ after_frag( fd_shred_ctx_t *    ctx,
 
         /* Copy the shred header into the frag and publish. */
         ulong sz = fd_shred_header_sz( shred->variant );
-
-        uchar* chunk = fd_chunk_to_laddr( ctx->repair_out_mem, ctx->repair_out_chunk); 
-        fd_memcpy(chunk, shred, sz );
-        fd_memcpy(chunk + sz, &src_ip4_addr, sizeof(src_ip4_addr));
-        sz += 4;
-
-        if (nonce_exists == 1) {
-            fd_memcpy(chunk + sz, &nonce, sizeof(nonce));
-            sz += 4;
-        }
-
+        fd_memcpy( fd_chunk_to_laddr( ctx->repair_out_mem, ctx->repair_out_chunk ), shred, sz );
         ulong tspub = fd_frag_meta_ts_comp( fd_tickcount() );
         fd_stem_publish( stem, ctx->repair_out_idx, sig, ctx->repair_out_chunk, sz, 0UL, ctx->tsorig, tspub );
         ctx->repair_out_chunk = fd_dcache_compact_next( ctx->repair_out_chunk, sz, ctx->repair_out_chunk0, ctx->repair_out_wmark );

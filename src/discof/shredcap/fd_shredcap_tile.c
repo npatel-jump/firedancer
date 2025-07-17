@@ -17,7 +17,9 @@
 #include <sys/socket.h>
 #include <linux/if_xdp.h>
 #include "generated/fd_shredcap_tile_seccomp.h"
+#include "../../util/pod/fd_pod_format.h"
 
+#include "../../discof/repair/fd_recorder.h"
 
 /* This tile spies on the net_shred, repair_net, and shred_repair links
    and currently outputs to a csv that can analyze repair performance
@@ -81,6 +83,8 @@ struct fd_capture_tile_ctx {
 
   fd_alloc_t * alloc;
   uchar contact_info_buffer[ MAX_BUFFER_SIZE ];
+
+  fd_recorder_t * recorder;
 };
 typedef struct fd_capture_tile_ctx fd_capture_tile_ctx_t;
 
@@ -230,6 +234,7 @@ after_frag( fd_capture_tile_ctx_t * ctx,
   if( FD_UNLIKELY( ctx->skip_frag ) ) return;
 
   if( ctx->in_kind[ in_idx ] == SHRED_REPAIR ) {
+
     /* This is a fec completes message! we can use it to check how long
        it takes to complete a fec */
 
@@ -261,7 +266,7 @@ after_frag( fd_capture_tile_ctx_t * ctx,
 
     fd_shred_t const * shred = fd_shred_parse( ctx->shred_buffer + hdr_sz, sz - hdr_sz );
     int   is_turbine = fd_disco_netmux_sig_proto( sig ) == DST_PROTO_SHRED;
-    uint  nonce      = is_turbine ? 0 : FD_LOAD(uint, ctx->shred_buffer + hdr_sz + fd_shred_sz( shred ) );
+    ulong  nonce      = is_turbine ? 0 : FD_LOAD(uint, ctx->shred_buffer + hdr_sz + fd_shred_sz( shred ) );
     int   is_data    = fd_shred_is_data( fd_shred_type( shred->variant ) );
     ulong slot       = shred->slot;
     uint  idx        = shred->idx;
@@ -274,11 +279,21 @@ after_frag( fd_capture_tile_ctx_t * ctx,
 
     char repair_data_buf[1024];
     snprintf( repair_data_buf, sizeof(repair_data_buf),
-             "%u,%u,%ld,%lu,%u,%u,%u,%d,%d,%u\n",
+             "%u,%u,%ld,%lu,%u,%u,%u,%d,%d,%lu\n",
               src_ip4_addr, src_port, fd_log_wallclock(), slot, ref_tick, fec_idx, idx, is_turbine, is_data, nonce );
 
     int err = fd_io_buffered_ostream_write( &ctx->shred_ostream, repair_data_buf, strlen(repair_data_buf) );
     FD_TEST( err==0 );
+
+    if (nonce != 0) {
+      fd_rwlock_write( &ctx->recorder->rw_lock );
+      fd_recorder_req_t * req = fd_recorder_req_query( ctx->recorder, nonce );
+      if (req) {
+        fd_recorder_req_remove(ctx->recorder, nonce, 1);
+      }
+      fd_rwlock_unwrite( &ctx->recorder->rw_lock );
+    }
+
   } else if( ctx->in_kind[ in_idx ] == REPAIR_NET ) {
     /* We have a valid repair request that we can finally decode.
        Unfortunately we actually have to decode because we cant cast
@@ -471,6 +486,14 @@ unprivileged_init( fd_topo_t *      topo,
   ctx->alloc = fd_alloc_join( fd_alloc_new( alloc_mem, FD_SHREDCAP_ALLOC_TAG ), fd_tile_idx() );
   if( FD_UNLIKELY( !ctx->alloc ) ) {
     FD_LOG_ERR( ( "fd_alloc_join failed" ) );
+  }
+
+  /* Recorder setup */
+  ctx->recorder = NULL;
+  ulong recorder_obj_id = fd_pod_queryf_ulong( topo->props, ULONG_MAX, "recorder" );
+  if( FD_LIKELY( recorder_obj_id!=ULONG_MAX ) ) {
+    ctx->recorder = fd_recorder_join( fd_topo_obj_laddr( topo, recorder_obj_id ) );
+    FD_TEST( ctx->recorder );
   }
 
   /* Setup the csv files to be in the expected state */

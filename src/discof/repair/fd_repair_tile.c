@@ -20,7 +20,7 @@
 #include "../forest/fd_forest.h"
 #include "fd_fec_repair.h"
 #include "fd_fec_chainer.h"
-#include "fd_repair_ledger.h"
+#include "fd_recorder.h"
 
 #include <errno.h>
 
@@ -109,8 +109,6 @@ struct fd_repair_tile_ctx {
   ulong * turbine_slot0;
   ulong * turbine_slot;
 
-  fd_repair_ledger_t * repair_ledger;
-
   uchar       identity_private_key[ 32 ];
   fd_pubkey_t identity_public_key;
 
@@ -147,6 +145,8 @@ struct fd_repair_tile_ctx {
   fd_blockstore_t   blockstore_ljoin;
   fd_blockstore_t * blockstore;
 
+  fd_recorder_t * recorder;
+
   fd_keyguard_client_t keyguard_client[1];
 };
 typedef struct fd_repair_tile_ctx fd_repair_tile_ctx_t;
@@ -171,7 +171,6 @@ scratch_footprint( fd_topo_tile_t const * tile ) {
   l = FD_LAYOUT_APPEND( l, fd_fec_sig_align(),            fd_fec_sig_footprint( 20 ) );
   l = FD_LAYOUT_APPEND( l, fd_reasm_align(),              fd_reasm_footprint( 20 ) );
   // l = FD_LAYOUT_APPEND( l, fd_fec_repair_align(),         fd_fec_repair_footprint( ( 1<<20 ), tile->repair.shred_tile_cnt ) );
-  l = FD_LAYOUT_APPEND( l, fd_repair_ledger_align(),       fd_repair_ledger_footprint() );
   l = FD_LAYOUT_APPEND( l, fd_fec_chainer_align(),        fd_fec_chainer_footprint( 1 << 20 ) ); // TODO: fix this
   l = FD_LAYOUT_APPEND( l, fd_scratch_smem_align(),       fd_scratch_smem_footprint( FD_REPAIR_SCRATCH_MAX ) );
   l = FD_LAYOUT_APPEND( l, fd_scratch_fmem_align(),       fd_scratch_fmem_footprint( FD_REPAIR_SCRATCH_DEPTH ) );
@@ -250,30 +249,41 @@ handle_new_cluster_contact_info( fd_repair_tile_ctx_t * ctx,
   /* Stop adding peers after we reach the peer max, but we may want to
      consider an eviction policy. */
   for( ulong i=0UL; i<dest_cnt; i++ ) {
-   if( FD_UNLIKELY( ctx->repair->peer_cnt >= FD_ACTIVE_KEY_MAX ) ) break;// FIXME: aiming to move all peer tracking out of lib into tile, leaving like this for now
+   if( FD_UNLIKELY( ctx->recorder->peer_cnt >= FD_ACTIVE_KEY_MAX ) ) break;// FIXME: aiming to move all peer tracking out of lib into tile, leaving like this for now
     fd_repair_peer_addr_t repair_peer = {
       .addr = in_dests[i].ip4_addr,
       .port = fd_ushort_bswap( in_dests[i].udp_port ),
     };
-    int dup = fd_repair_add_active_peer( ctx->repair, &repair_peer, in_dests[i].pubkey );
-    fd_repair_ledger_peer_t * peer = fd_repair_ledger_peer_query( ctx->repair_ledger, in_dests[i].pubkey );
+    // int dup = fd_repair_add_active_peer( ctx->repair, &repair_peer, in_dests[i].pubkey );
+    
+    fd_rwlock_read( &ctx->recorder->rw_lock );
+    fd_recorder_peer_t * peer = fd_recorder_peer_query( ctx->recorder, in_dests[i].pubkey );
+    fd_rwlock_unread( &ctx->recorder->rw_lock );
+
     if (peer && !peer->pong_sent) {
       fd_repair_send_request(ctx, ctx->stem, ctx->repair, 0, 0, 0, in_dests[i].pubkey, fd_log_wallclock());
       peer->pong_sent = 1;
       // FD_LOG_INFO(("Sent pong to peer: time: %lu", (ulong)fd_log_wallclock()));
+   
     } else {
-      fd_repair_ledger_peer_add(
-          ctx->repair_ledger, 
+      fd_rwlock_write( &ctx->recorder->rw_lock );
+      fd_recorder_peer_add(
+          ctx->recorder, 
           in_dests[i].pubkey,
           (fd_ip4_port_t){ .addr = in_dests[i].ip4_addr, .port = repair_peer.port },
           fd_log_wallclock() 
       );
+      fd_rwlock_unwrite( &ctx->recorder->rw_lock );
     }
 
-    if( !dup ) {
-      ulong hash_src = 0xfffffUL & fd_ulong_hash( (ulong)in_dests[i].ip4_addr | ((ulong)repair_peer.port<<32) );
-      FD_LOG_INFO(( "Added repair peer: pubkey %s hash_src %lu", FD_BASE58_ENC_32_ALLOCA(in_dests[i].pubkey), hash_src ));
-    }
+    // if( !dup ) {
+    //   // if (i == 0) {
+    //   //   __asm__("int $3");
+    //   // }
+    //   ulong hash_src = 0xfffffUL & fd_ulong_hash( (ulong)in_dests[i].ip4_addr | ((ulong)repair_peer.port<<32) );
+    //   (void)hash_src;
+    //   // FD_LOG_INFO(( "Added repair peer: pubkey %s hash_src %lu", FD_BASE58_ENC_32_ALLOCA(in_dests[i].pubkey), hash_src ));
+    // }
   }
 }
 
@@ -413,7 +423,7 @@ fd_repair_send_request( fd_repair_tile_ctx_t   * repair_tile_ctx,
 
   /* Send requests starting where we left off last time. i.e. if n < current_nonce, seek forward */
   /* Track statistics */
-  fd_repair_ledger_peer_t * peer = fd_repair_ledger_peer_query( repair_tile_ctx->repair_ledger, recipient );
+  fd_recorder_peer_t * peer = fd_recorder_peer_query( repair_tile_ctx->recorder, recipient );
   if (!peer) return;
 
   ulong nonce = glob->next_nonce;
@@ -421,20 +431,23 @@ fd_repair_send_request( fd_repair_tile_ctx_t   * repair_tile_ctx,
   fd_repair_protocol_t protocol;
   fd_repair_construct_request_protocol( glob, &protocol, type, slot, shred_index, recipient, glob->next_nonce, now );
   glob->next_nonce++;
-  fd_active_elem_t * active = fd_active_table_query( glob->actives, recipient, NULL );
-
-  active->avg_reqs++;
+  // fd_active_elem_t * active = fd_active_table_query( glob->actives, recipient, NULL );
+  // if (active->addr.addr != peer->ip4.addr){
+  //   __asm__("int $3");
+  // }
+  // active->avg_reqs++;
   glob->metrics.send_pkt_cnt++;
 
   uchar buf[1024];
-  ulong buflen       = fd_repair_sign_and_send( repair_tile_ctx, &protocol, &active->addr, buf, sizeof(buf) );
+  ulong buflen       = fd_repair_sign_and_send( repair_tile_ctx, &protocol, &peer->ip4, buf, sizeof(buf) );
   ulong tsorig       = fd_frag_meta_ts_comp( fd_tickcount() );
   uint  src_ip4_addr = 0U; /* unknown */
-  send_packet( repair_tile_ctx, stem, 1, active->addr.addr, active->addr.port, src_ip4_addr, buf, buflen, tsorig );
+  send_packet( repair_tile_ctx, stem, 1, peer->ip4.addr, peer->ip4.port, src_ip4_addr, buf, buflen, tsorig );
 
   if (slot!=0) {
-  fd_repair_ledger_req_insert(
-                              repair_tile_ctx->repair_ledger,
+      fd_rwlock_write( &repair_tile_ctx->recorder->rw_lock );
+      fd_recorder_req_insert(
+      repair_tile_ctx->recorder,
                               nonce,
                               (ulong)now,
                               recipient,
@@ -443,7 +456,8 @@ fd_repair_send_request( fd_repair_tile_ctx_t   * repair_tile_ctx,
                               shred_index,
                               type
     );
-    FD_LOG_INFO(("Insert req to peer: %s, nonce: %lu, slot: %lu, shred_idx: %u, type: %u", FD_BASE58_ENC_32_ALLOCA(recipient), nonce, slot, shred_index, type));
+    fd_rwlock_unwrite( &repair_tile_ctx->recorder->rw_lock );
+    // FD_LOG_INFO(("Insert req to peer: %s, nonce: %lu, slot: %lu, shred_idx: %u, type: %u", FD_BASE58_ENC_32_ALLOCA(recipient), nonce, slot, shred_index, type));
   }
 }
 
@@ -457,7 +471,9 @@ fd_repair_send_requests( fd_repair_tile_ctx_t *   ctx,
   fd_repair_t * glob = ctx->repair;
 
 fd_pubkey_t * selected_peers[FD_REPAIR_NUM_NEEDED_PEERS];
-fd_repair_ledger_select_peers(ctx->repair_ledger, FD_REPAIR_NUM_NEEDED_PEERS, selected_peers);
+  fd_rwlock_read( &ctx->recorder->rw_lock );
+  fd_recorder_select_peers(ctx->recorder, FD_REPAIR_NUM_NEEDED_PEERS, selected_peers);
+  fd_rwlock_unread( &ctx->recorder->rw_lock );
 
 for( uint i=0; i<FD_REPAIR_NUM_NEEDED_PEERS; i++ ) {
     if( !selected_peers[i] ) break;
@@ -814,8 +830,7 @@ after_frag( fd_repair_tile_ctx_t * ctx,
     /* Initialize the forest, which requires the root to be ready.  This
        must be the case if we have received a frag from shred, because
        shred requires stake weights, which implies a genesis or snapshot
-       slot has been loaded. */
-    fd_repair_parse_shred_header( ctx->repair, ctx->buffer, ctx->repair_ledger, &sz );
+       slot has been loaded. */    
 
     ulong wmark = fd_fseq_query( ctx->wmark );
     if( FD_UNLIKELY( fd_forest_root_slot( ctx->forest ) == ULONG_MAX ) ) {
@@ -895,6 +910,7 @@ after_frag( fd_repair_tile_ctx_t * ctx,
           fd_stem_publish( ctx->stem, REPLAY_OUT_IDX, sig, 0, 0, 0, tsorig, tspub );
           if( FD_UNLIKELY( out.slot_complete ) ) {
             fd_reasm_remove( ctx->reasm, reasm );
+            FD_LOG_INFO(( "SLOT COMPLETE: %lu, time: %ld", out.slot, fd_log_wallclock() ));
           }
         }
       }
@@ -910,7 +926,10 @@ after_frag( fd_repair_tile_ctx_t * ctx,
       int               data_complete = !!(shred->data.flags & FD_SHRED_DATA_FLAG_DATA_COMPLETE);
       int               slot_complete = !!(shred->data.flags & FD_SHRED_DATA_FLAG_SLOT_COMPLETE);
       fd_forest_ele_t * ele           = fd_forest_data_shred_insert( ctx->forest, shred->slot, shred->data.parent_off, shred->idx, shred->fec_set_idx, data_complete, slot_complete );
-
+      // print only if its teh first shred in the slot
+      if( FD_UNLIKELY( shred->idx == 0 ) ) {
+        FD_LOG_INFO(("FIRST SHRED: %lu, time: %ld", shred->slot, fd_log_wallclock()));
+      }
       /* Check if there are FECs to force complete. Algorithm: window
          through the idxs in interval [i, j). If j = next fec_set_idx
          then we know we can force complete the FEC set interval [i, j)
@@ -977,11 +996,12 @@ after_credit( fd_repair_tile_ctx_t * ctx,
      doing any work. */
   *charge_busy = 1;
 
-  fd_repair_ledger_req_expire(ctx->repair_ledger, (ulong)fd_log_wallclock(), 0);
-
+  fd_rwlock_write( &ctx->recorder->rw_lock );
+  fd_recorder_req_expire(ctx->recorder, (ulong)fd_log_wallclock(), 0);
+  fd_rwlock_unwrite( &ctx->recorder->rw_lock );
 
   if( FD_UNLIKELY( ctx->forest->root == ULONG_MAX ) ) return;
-  if( FD_UNLIKELY( ctx->repair->peer_cnt == 0 ) ) return; /* no peers to send requests to */
+  if( FD_UNLIKELY( ctx->recorder->peer_cnt == 0 ) ) return; /* no peers to send requests to */
 
   long now = fd_log_wallclock();
 
@@ -1195,7 +1215,6 @@ unprivileged_init( fd_topo_t *      topo,
   ctx->forest = FD_SCRATCH_ALLOC_APPEND( l, fd_forest_align(), fd_forest_footprint( tile->repair.slot_max ) );
   ctx->fec_sigs = FD_SCRATCH_ALLOC_APPEND( l, fd_fec_sig_align(), fd_fec_sig_footprint( 20 ) );
   ctx->reasm = FD_SCRATCH_ALLOC_APPEND( l, fd_reasm_align(), fd_reasm_footprint( 20 ) );
-  ctx->repair_ledger = FD_SCRATCH_ALLOC_APPEND( l, fd_repair_ledger_align(), fd_repair_ledger_footprint() );
   // ctx->fec_repair = FD_SCRATCH_ALLOC_APPEND( l, fd_fec_repair_align(), fd_fec_repair_footprint(  ( 1<<20 ), tile->repair.shred_tile_cnt ) );
   /* Look at fec_repair.h for an explanation of this fec_max. */
 
@@ -1243,6 +1262,13 @@ unprivileged_init( fd_topo_t *      topo,
   ctx->blockstore = fd_blockstore_join( &ctx->blockstore_ljoin, fd_topo_obj_laddr( topo, blockstore_obj_id ) );
   FD_TEST( ctx->blockstore!=NULL );
 
+  ctx->recorder = NULL;
+  ulong recorder_obj_id = fd_pod_queryf_ulong( topo->props, ULONG_MAX, "recorder" );
+  if( FD_LIKELY( recorder_obj_id!=ULONG_MAX ) ) {
+    ctx->recorder = fd_recorder_join( fd_topo_obj_laddr( topo, recorder_obj_id ) );
+    FD_TEST( ctx->recorder );
+  }
+
   FD_LOG_NOTICE(( "repair starting" ));
 
   /* Repair set up */
@@ -1250,7 +1276,6 @@ unprivileged_init( fd_topo_t *      topo,
   ctx->repair = fd_repair_join( fd_repair_new( ctx->repair, ctx->repair_seed ) );
   ctx->forest = fd_forest_join( fd_forest_new( ctx->forest, tile->repair.slot_max, ctx->repair_seed ) );
   // ctx->fec_repair  = fd_fec_repair_join( fd_fec_repair_new( ctx->fec_repair, ( tile->repair.max_pending_shred_sets + 2 ), tile->repair.shred_tile_cnt,  0 ) );
-  ctx->repair_ledger = fd_repair_ledger_join( fd_repair_ledger_new( ctx->repair_ledger, ctx->repair_seed, 10000e6 ) ); /* timeout of 10 seconds */
   ctx->fec_sigs = fd_fec_sig_join( fd_fec_sig_new( ctx->fec_sigs, 20 ) );
   ctx->reasm = fd_reasm_join( fd_reasm_new( ctx->reasm, 20 ) );
   ctx->fec_chainer = fd_fec_chainer_join( fd_fec_chainer_new( ctx->fec_chainer, 1 << 20, 0 ) );
