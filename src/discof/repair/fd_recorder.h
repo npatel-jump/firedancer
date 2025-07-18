@@ -449,14 +449,14 @@ FD_FN_PURE static inline fd_recorder_peer_t const *
 fd_recorder_peer_query_const( fd_recorder_t const * recorder, fd_pubkey_t const * pubkey ) {
   fd_recorder_peer_map_t const * peer_map  = fd_recorder_peer_map_const( recorder );
   fd_recorder_peer_t const *     peer_pool = fd_recorder_peer_pool_const( recorder );
-  return fd_recorder_peer_map_ele_query_const( peer_map, (void *)pubkey, NULL, peer_pool );
+  return fd_recorder_peer_map_ele_query_const( peer_map, pubkey, NULL, peer_pool );
 }
 
 FD_FN_PURE static inline fd_recorder_peer_t *
 fd_recorder_peer_query( fd_recorder_t * recorder, fd_pubkey_t const * pubkey ) {
   fd_recorder_peer_map_t * peer_map  = fd_recorder_peer_map( recorder );
   fd_recorder_peer_t *     peer_pool = fd_recorder_peer_pool( recorder );
-  return fd_recorder_peer_map_ele_query( peer_map, (void *)pubkey, NULL, peer_pool );
+  return fd_recorder_peer_map_ele_query( peer_map, pubkey, NULL, peer_pool );
 }
 
 /* fd_recorder_peer_remove removes a peer by its pubkey.

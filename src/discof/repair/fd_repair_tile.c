@@ -961,6 +961,7 @@ after_frag( fd_repair_tile_ctx_t * ctx,
         }
       }
     }
+    FD_LOG
     return;
   }
 

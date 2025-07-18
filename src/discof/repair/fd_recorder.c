@@ -231,6 +231,10 @@ fd_recorder_req_insert( fd_recorder_t *             recorder,
   /* Insert into map */
   fd_recorder_req_map_ele_insert( req_map, req, req_pool );
 
+#if FD_PEER_LEDGER_USE_HANDHOLDING
+  FD_TEST( !fd_recorder_req_map_verify( req_map, fd_recorder_req_pool_max( req_pool ), req_pool ) );
+#endif
+
   /* Get the pool index of this request */
   // ulong req_idx = fd_recorder_req_pool_idx( req_pool, req );
 
@@ -286,7 +290,9 @@ fd_recorder_req_remove( fd_recorder_t * recorder, ulong nonce, int is_recv ) {
   fd_recorder_req_map_ele_remove( req_map, &nonce, NULL, req_pool );
   fd_recorder_req_pool_ele_release( req_pool, req );
 
-
+#if FD_PEER_LEDGER_USE_HANDHOLDING
+  FD_TEST( !fd_recorder_req_map_verify( req_map, fd_recorder_req_pool_max( req_pool ), req_pool ) );
+#endif
 
   if (is_recv) {
     recorder->req_handled_cnt++;
@@ -367,10 +373,17 @@ fd_recorder_verify( fd_recorder_t const * recorder ) {
   fd_recorder_req_t const *     req_pool = fd_recorder_req_pool_const( recorder );
   fd_recorder_req_map_t const * req_map  = fd_recorder_req_map_const( recorder );
   fd_recorder_req_dlist_t const * req_dlist  = fd_recorder_req_dlist_const( recorder );
+  fd_recorder_peer_t const *     peer_pool = fd_recorder_peer_pool_const( recorder );
+  fd_recorder_peer_map_t const * peer_map  = fd_recorder_peer_map_const( recorder );
 
   /* Verify map consistency */
   if( fd_recorder_req_map_verify( req_map, fd_recorder_req_pool_max( req_pool ), req_pool ) ) {
     FD_LOG_WARNING(( "map verification failed" ));
+    return -1;
+  }
+
+  if( fd_recorder_peer_map_verify( peer_map, fd_recorder_peer_pool_max( peer_pool ), peer_pool ) ) {
+    FD_LOG_WARNING(( "peer map verification failed" ));
     return -1;
   }
 
@@ -415,8 +428,8 @@ fd_recorder_peer_add( fd_recorder_t *             recorder,
   fd_recorder_peer_t * existing = fd_recorder_peer_map_ele_query( peer_map, pubkey, NULL, peer_pool );
   if( existing ) {
     /* Update existing peer info */
-    existing->ip4 = ip4;
-    existing->last_recv = current_time;
+    // existing->ip4 = ip4;
+    // existing->last_recv = current_time;
     return existing;
   }
 
@@ -438,7 +451,14 @@ fd_recorder_peer_add( fd_recorder_t *             recorder,
   peer->pong_sent         = 0;
 
   /* Insert into map */
-  fd_recorder_peer_map_ele_insert( peer_map, peer, peer_pool );
+  
+  if( FD_UNLIKELY( !fd_recorder_peer_map_ele_insert( peer_map, peer, peer_pool ) ) ) {
+    __asm__("int $3");
+  }
+
+#if FD_PEER_LEDGER_USE_HANDHOLDING
+  FD_TEST( !fd_recorder_peer_map_verify( peer_map, fd_recorder_peer_pool_max( peer_pool ), peer_pool ) );
+#endif
 
   /* Add to pubkey array */
   recorder->peer_pubkeys[recorder->peer_cnt] = *pubkey;
@@ -498,6 +518,9 @@ fd_recorder_peer_remove( fd_recorder_t * recorder, fd_pubkey_t const * pubkey, i
   fd_recorder_peer_t *     peer_pool = fd_recorder_peer_pool( recorder );
   fd_recorder_peer_t *     peer = fd_recorder_peer_map_ele_remove( peer_map, (void *)pubkey, NULL, peer_pool );
   if( peer ) {
+#if FD_PEER_LEDGER_USE_HANDHOLDING
+    FD_TEST( !fd_recorder_peer_map_verify( peer_map, fd_recorder_peer_pool_max( peer_pool ), peer_pool ) );
+#endif
     recorder->peer_cnt--;
     
     recorder->peer_pubkeys[peer->peer_list_idx] = recorder->peer_pubkeys[recorder->peer_cnt];
@@ -565,9 +588,9 @@ fd_recorder_reshuffle_peers( fd_recorder_t * recorder ) {
     }
   }
   
-  // FD_LOG_INFO(( "Reshuffled peers - High: %lu, Medium: %lu, Low: %lu, Zero HR: %lu",
-  //               recorder->high_priority_cnt, recorder->medium_priority_cnt,
-  //               recorder->low_priority_cnt, recorder->zero_hr_cnt ));
+    FD_LOG_INFO(( "Reshuffled peers - High: %lu, Medium: %lu, Low: %lu, Zero HR: %lu",
+                  recorder->high_priority_cnt, recorder->medium_priority_cnt,
+                  recorder->low_priority_cnt, recorder->zero_hr_cnt ));
 }
 
 void
@@ -657,6 +680,7 @@ fd_recorder_select_peers(fd_recorder_t * recorder, uint num_peers, fd_pubkey_t *
       FD_LOG_WARNING(( "No peers available for selection" ));
       break;
     }
+
   }
 }
 

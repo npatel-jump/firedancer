@@ -40,6 +40,9 @@ include config/base.mk
 include config/extra/with-clang.mk
 endif
 
+
+CFLAGS+="-DFD_PEER_LEDGER_USE_HANDHOLDING=1"
+FD_DISABLE_OPTIMIZATION:=1
 BUILDDIR?=native/$(CC)
 CPPFLAGS+=-march=native -mtune=native
 RUSTFLAGS+=-C target-cpu=native
