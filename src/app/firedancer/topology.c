@@ -218,7 +218,7 @@ setup_snapshots( config_t *       config,
   }
   if( FD_UNLIKELY( incremental_is_file ) ) {
     strncpy( tile->replay.incremental, config->tiles.replay.incremental, sizeof(tile->replay.incremental) );
-    tile->replay.incremental_src_type = FD_SNAPSHOT_SRC_FILE;
+  tile->replay.incremental_src_type = FD_SNAPSHOT_SRC_FILE;
   }
   tile->replay.incremental[ sizeof(tile->replay.incremental)-1UL ] = '\0';
 

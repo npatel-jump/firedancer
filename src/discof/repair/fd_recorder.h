@@ -60,9 +60,9 @@ The recorder tracks peers and outstanding repair requests
 #define FD_MAX_PEERS (1<<12)
 #define MAX_REQUESTS (1000000UL)
 
-#ifndef FD_PEER_LEDGER_USE_HANDHOLDING
-#define FD_PEER_LEDGER_USE_HANDHOLDING 1
-#endif
+// #ifndef FD_PEER_LEDGER_USE_HANDHOLDING
+// #define FD_PEER_LEDGER_USE_HANDHOLDING 1
+// #endif
 
 
 #define FD_RECORDER_MAGIC (0xf17eda2ce7940570UL) /* firedancer recorder version 0 */
@@ -114,8 +114,6 @@ struct __attribute__((aligned(64UL))) fd_recorder_peer {
   double        ewma_hr;            /* exponentially weighted moving average hit rate */
   double        ewma_rtt;           /* exponentially weighted moving average RTT */
   ulong         num_inflight_req;   /* number of inflight requests to this peer */
-  ulong         peer_list_idx;      /* index of the peer in the peer_list array */
-  uint          pong_sent;          /* 1 if pong has been sent to this peer */
 };
 typedef struct fd_recorder_peer fd_recorder_peer_t;
 
@@ -130,7 +128,7 @@ typedef struct fd_recorder_peer fd_recorder_peer_t;
 #define MAP_KEY   key
 #define MAP_KEY_T fd_pubkey_t
 #define MAP_KEY_EQ(k0,k1) (!memcmp( (k0), (k1), 32UL ))
-#define MAP_KEY_HASH(key,seed) fd_ulong_hash( ((ulong *)(key))[0] ^ (seed) )
+#define MAP_KEY_HASH(key,seed) fd_hash((seed),(key),32UL)
 #include "../../util/tmpl/fd_map_chain.c"
 
 #define FD_RECORDER_MAGIC_INTERNAL (0xf17eda2ce7940570UL)
@@ -157,7 +155,6 @@ struct __attribute__((aligned(128UL))) fd_recorder {
   ulong req_handled_cnt; /* total number of handled requests */ // maybe remove?
  
   ulong peer_cnt;        /* current number of active peers */
-  fd_pubkey_t peer_pubkeys[FD_MAX_PEERS];
   fd_pubkey_t * high_priority_peers[FD_MAX_PEERS];
   fd_pubkey_t * medium_priority_peers[FD_MAX_PEERS];
   fd_pubkey_t * low_priority_peers[FD_MAX_PEERS];
@@ -175,7 +172,6 @@ struct __attribute__((aligned(128UL))) fd_recorder {
   
   ulong cycle_position;       /* position in the weighted round-robin cycle */
   ulong cycle_count;          /* number of complete cycles */
-  ulong pubkeys_idx; /* index of the current peer in the peer_pubkeys array when iterating */
 
 };
 typedef struct fd_recorder fd_recorder_t;

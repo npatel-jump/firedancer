@@ -848,6 +848,7 @@ after_frag( fd_shred_ctx_t *    ctx,
         ulong sz = fd_shred_header_sz( shred->variant );
         fd_memcpy( fd_chunk_to_laddr( ctx->repair_out_mem, ctx->repair_out_chunk ), shred, sz );
         ulong tspub = fd_frag_meta_ts_comp( fd_tickcount() );
+        FD_LOG_INFO(("Published shred %lu %u %u, time: %ld", shred->slot, shred->idx, shred->fec_set_idx, fd_log_wallclock()));
         fd_stem_publish( stem, ctx->repair_out_idx, sig, ctx->repair_out_chunk, sz, 0UL, ctx->tsorig, tspub );
         ctx->repair_out_chunk = fd_dcache_compact_next( ctx->repair_out_chunk, sz, ctx->repair_out_chunk0, ctx->repair_out_wmark );
       }

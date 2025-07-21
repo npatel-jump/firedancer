@@ -260,9 +260,8 @@ handle_new_cluster_contact_info( fd_repair_tile_ctx_t * ctx,
     fd_recorder_peer_t * peer = fd_recorder_peer_query( ctx->recorder, in_dests[i].pubkey );
     fd_rwlock_unread( &ctx->recorder->rw_lock );
 
-    if (peer && !peer->pong_sent) {
+    if (peer) {
       fd_repair_send_request(ctx, ctx->stem, ctx->repair, 0, 0, 0, in_dests[i].pubkey, fd_log_wallclock());
-      peer->pong_sent = 1;
       // FD_LOG_INFO(("Sent pong to peer: time: %lu", (ulong)fd_log_wallclock()));
    
     } else {
@@ -445,7 +444,7 @@ fd_repair_send_request( fd_repair_tile_ctx_t   * repair_tile_ctx,
   send_packet( repair_tile_ctx, stem, 1, peer->ip4.addr, peer->ip4.port, src_ip4_addr, buf, buflen, tsorig );
 
   if (slot!=0) {
-      fd_rwlock_write( &repair_tile_ctx->recorder->rw_lock );
+      // fd_rwlock_write( &repair_tile_ctx->recorder->rw_lock );
       fd_recorder_req_insert(
       repair_tile_ctx->recorder,
                               nonce,
@@ -456,7 +455,7 @@ fd_repair_send_request( fd_repair_tile_ctx_t   * repair_tile_ctx,
                               shred_index,
                               type
     );
-    fd_rwlock_unwrite( &repair_tile_ctx->recorder->rw_lock );
+    // fd_rwlock_unwrite( &repair_tile_ctx->recorder->rw_lock );
     // FD_LOG_INFO(("Insert req to peer: %s, nonce: %lu, slot: %lu, shred_idx: %u, type: %u", FD_BASE58_ENC_32_ALLOCA(recipient), nonce, slot, shred_index, type));
   }
 }
@@ -471,15 +470,16 @@ fd_repair_send_requests( fd_repair_tile_ctx_t *   ctx,
   fd_repair_t * glob = ctx->repair;
 
 fd_pubkey_t * selected_peers[FD_REPAIR_NUM_NEEDED_PEERS];
-  fd_rwlock_read( &ctx->recorder->rw_lock );
+  fd_rwlock_write( &ctx->recorder->rw_lock );
   fd_recorder_select_peers(ctx->recorder, FD_REPAIR_NUM_NEEDED_PEERS, selected_peers);
-  fd_rwlock_unread( &ctx->recorder->rw_lock );
 
 for( uint i=0; i<FD_REPAIR_NUM_NEEDED_PEERS; i++ ) {
     if( !selected_peers[i] ) break;
     fd_repair_send_request( ctx, stem, glob, type, slot, shred_index, selected_peers[i], now );
       // FD_LOG_INFO(("Sent request to peer: time: %lu", (ulong)fd_log_wallclock()));
 }
+fd_rwlock_unwrite( &ctx->recorder->rw_lock );
+
 
 }
 
@@ -831,7 +831,8 @@ after_frag( fd_repair_tile_ctx_t * ctx,
        must be the case if we have received a frag from shred, because
        shred requires stake weights, which implies a genesis or snapshot
        slot has been loaded. */    
-
+    fd_shred_t * shred = (fd_shred_t *)fd_type_pun( ctx->buffer );
+    FD_LOG_INFO(("Recieved shred %lu %u %u, time: %ld", shred->slot, shred->idx, shred->fec_set_idx, fd_log_wallclock()));
     ulong wmark = fd_fseq_query( ctx->wmark );
     if( FD_UNLIKELY( fd_forest_root_slot( ctx->forest ) == ULONG_MAX ) ) {
       fd_forest_init( ctx->forest, wmark );
@@ -848,11 +849,11 @@ after_frag( fd_repair_tile_ctx_t * ctx,
       ctx->repair_iter = fd_forest_iter_init( ctx->forest );
     }
 
-    fd_shred_t * shred = (fd_shred_t *)fd_type_pun( ctx->buffer );
     if( FD_UNLIKELY( shred->slot <= fd_forest_root_slot( ctx->forest ) ) ) {
       FD_LOG_WARNING(( "shred %lu %u %u too old, ignoring", shred->slot, shred->idx, shred->fec_set_idx ));
       return;
     };
+
 
     /* Update turbine_slot0 and turbine_slot. */
 
@@ -910,7 +911,7 @@ after_frag( fd_repair_tile_ctx_t * ctx,
           fd_stem_publish( ctx->stem, REPLAY_OUT_IDX, sig, 0, 0, 0, tsorig, tspub );
           if( FD_UNLIKELY( out.slot_complete ) ) {
             fd_reasm_remove( ctx->reasm, reasm );
-            FD_LOG_INFO(( "SLOT COMPLETE: %lu, time: %ld", out.slot, fd_log_wallclock() ));
+            // FD_LOG_INFO(( "SLOT COMPLETE: %lu, time: %ld", out.slot, fd_log_wallclock() ));
           }
         }
       }
@@ -927,9 +928,9 @@ after_frag( fd_repair_tile_ctx_t * ctx,
       int               slot_complete = !!(shred->data.flags & FD_SHRED_DATA_FLAG_SLOT_COMPLETE);
       fd_forest_ele_t * ele           = fd_forest_data_shred_insert( ctx->forest, shred->slot, shred->data.parent_off, shred->idx, shred->fec_set_idx, data_complete, slot_complete );
       // print only if its teh first shred in the slot
-      if( FD_UNLIKELY( shred->idx == 0 ) ) {
-        FD_LOG_INFO(("FIRST SHRED: %lu, time: %ld", shred->slot, fd_log_wallclock()));
-      }
+      // if( FD_UNLIKELY( shred->idx == 0 ) ) {
+      //   FD_LOG_INFO(("FIRST SHRED: %lu, time: %ld", shred->slot, fd_log_wallclock()));
+      // }
       /* Check if there are FECs to force complete. Algorithm: window
          through the idxs in interval [i, j). If j = next fec_set_idx
          then we know we can force complete the FEC set interval [i, j)
@@ -961,7 +962,6 @@ after_frag( fd_repair_tile_ctx_t * ctx,
         }
       }
     }
-    FD_LOG
     return;
   }
 
@@ -1046,7 +1046,7 @@ after_credit( fd_repair_tile_ctx_t * ctx,
      head of frontier, because we could end up traversing down a very
      long tree if we are far behind. */
 
-  if( FD_UNLIKELY( now - ctx->tsreset > (long)40e6 ) ) {
+  if( FD_UNLIKELY( now - ctx->tsreset > (long)100e6 ) ) {
     // reset iterator to the beginning of the forest frontier
     ctx->repair_iter = fd_forest_iter_init( ctx->forest );
     ctx->tsreset = now;

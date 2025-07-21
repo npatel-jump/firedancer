@@ -366,7 +366,7 @@ fd_repair_create_inflight_request( fd_repair_t * glob, int type, ulong slot, uin
     dupelem->last_send_time = 0L;
   }
 
-  if( FD_LIKELY( dupelem->last_send_time+(long)100e6  < now ) ) { /* 40ms */
+  if( FD_LIKELY( dupelem->last_send_time+(long)10e6  < now ) ) { /* 40ms */
     dupelem->last_send_time = now;
     dupelem->req_cnt        = FD_REPAIR_NUM_NEEDED_PEERS;
     return 1;

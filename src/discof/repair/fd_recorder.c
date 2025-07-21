@@ -11,8 +11,16 @@
    header file. This implementation does NOT acquire or release locks
    internally. 
    
-   The only exception is fd_recorder_new() which initializes the
-   lock structure. */
+  fd_recorder_new() initializes the lock structure. 
+  
+  fd_recorder_req_insert() requires a write lock 
+  fd_recorder_req_remove() requires a write lock
+  fd_recorder_req_expire() requires a write lock
+  fd_recorder_verify() requires a read lock
+  fd_recorder_print() requires a read lock
+  fd_recorder_print_first_nonce() requires a read lock
+  fd_recorder_select_peers() requires a write lock
+  */
 
 void *
 fd_recorder_new( void * shmem, ulong seed, ulong timeout_ns ) {
@@ -67,7 +75,6 @@ fd_recorder_new( void * shmem, ulong seed, ulong timeout_ns ) {
   recorder->req_expired_cnt   = 0UL;
   recorder->req_handled_cnt   = 0UL;
   recorder->peer_cnt          = 0UL;
-  recorder->pubkeys_idx       = 0UL;
 
   /* Initialize priority counts and indices */
   recorder->high_priority_cnt = 0UL;
@@ -86,8 +93,7 @@ fd_recorder_new( void * shmem, ulong seed, ulong timeout_ns ) {
   /* Initialize the read-write lock */
   recorder->rw_lock = (fd_rwlock_t){0};
 
-  /* Initialize peer pubkeys array */
-  memset( recorder->peer_pubkeys, 0, sizeof(recorder->peer_pubkeys) );
+  /* peer_pubkeys array removed - using map iteration instead */
 
   FD_COMPILER_MFENCE();
   FD_VOLATILE( recorder->magic ) = FD_RECORDER_MAGIC;
@@ -448,7 +454,6 @@ fd_recorder_peer_add( fd_recorder_t *             recorder,
   peer->ewma_hr           = -1;
   peer->ewma_rtt          = 0UL;
   peer->num_inflight_req  = 0UL;
-  peer->pong_sent         = 0;
 
   /* Insert into map */
   
@@ -460,9 +465,7 @@ fd_recorder_peer_add( fd_recorder_t *             recorder,
   FD_TEST( !fd_recorder_peer_map_verify( peer_map, fd_recorder_peer_pool_max( peer_pool ), peer_pool ) );
 #endif
 
-  /* Add to pubkey array */
-  recorder->peer_pubkeys[recorder->peer_cnt] = *pubkey;
-  peer->peer_list_idx = recorder->peer_cnt;
+  /* Increment peer count */
   recorder->peer_cnt++;
 
   /* Trigger reshuffle on next select_peers call by resetting cycle */
@@ -522,13 +525,6 @@ fd_recorder_peer_remove( fd_recorder_t * recorder, fd_pubkey_t const * pubkey, i
     FD_TEST( !fd_recorder_peer_map_verify( peer_map, fd_recorder_peer_pool_max( peer_pool ), peer_pool ) );
 #endif
     recorder->peer_cnt--;
-    
-    recorder->peer_pubkeys[peer->peer_list_idx] = recorder->peer_pubkeys[recorder->peer_cnt];
-    fd_recorder_peer_t * peer_to_swap = fd_recorder_peer_query( recorder, &recorder->peer_pubkeys[recorder->peer_cnt] );
-    peer_to_swap->peer_list_idx = peer->peer_list_idx;
-    recorder->peer_pubkeys[recorder->peer_cnt] = (fd_pubkey_t){0};
-    
-    // recorder->pubkeys_idx--;
 
     if (is_recv) {
       recorder->req_expired_cnt++;
@@ -564,29 +560,37 @@ fd_recorder_reshuffle_peers( fd_recorder_t * recorder ) {
   
   fd_recorder_peer_map_t * peer_map = fd_recorder_peer_map( recorder );
   fd_recorder_peer_t * peer_pool = fd_recorder_peer_pool( recorder );
-  
-  /* Iterate through all peers and categorize them */
-  for( ulong i = 0; i < recorder->peer_cnt; i++ ) {
-    fd_pubkey_t * pubkey = &recorder->peer_pubkeys[i];
-    fd_recorder_peer_t * peer = fd_recorder_peer_map_ele_query( peer_map, pubkey, NULL, peer_pool );
-    
-    if( FD_UNLIKELY( !peer ) ) continue;
-    
-    /* Check if peer has zero hit rate */
-    if( peer->ewma_hr == 0.0 ) {
-      recorder->zero_hr_peers[recorder->zero_hr_cnt++] = pubkey;
-    }
-    /* Categorize by RTT (convert from nanoseconds to milliseconds) */
-    else if( peer->ewma_rtt < 50000000UL ) { /* < 50ms */
-      recorder->high_priority_peers[recorder->high_priority_cnt++] = pubkey;
-    }
-    else if( peer->ewma_rtt < 100000000UL ) { /* 50-100ms */
-      recorder->medium_priority_peers[recorder->medium_priority_cnt++] = pubkey;
-    }
-    else { /* >= 100ms */
-      recorder->low_priority_peers[recorder->low_priority_cnt++] = pubkey;
-    }
+
+  int val = 0;
+  for( fd_recorder_peer_map_iter_t iter = fd_recorder_peer_map_iter_init( peer_map, peer_pool );
+  !fd_recorder_peer_map_iter_done( iter, peer_map, peer_pool );
+  iter = fd_recorder_peer_map_iter_next( iter, peer_map, peer_pool ) ) {
+    val++;
   }
+  FD_LOG_INFO(("val: %d", val));
+  
+  /* Iterate through all peers in the map and categorize them */
+  for( fd_recorder_peer_map_iter_t iter = fd_recorder_peer_map_iter_init( peer_map, peer_pool );
+       !fd_recorder_peer_map_iter_done( iter, peer_map, peer_pool );
+       iter = fd_recorder_peer_map_iter_next( iter, peer_map, peer_pool ) ) {
+    
+      fd_recorder_peer_t * peer = fd_recorder_peer_map_iter_ele( iter, peer_map, peer_pool );
+      
+      /* Check if peer has zero hit rate */
+      if( peer->ewma_hr == 0.0 ) {
+        recorder->zero_hr_peers[recorder->zero_hr_cnt++] = &peer->key;
+      }
+      else if( peer->ewma_rtt < 50000000UL ) { /* < 50ms */
+        recorder->high_priority_peers[recorder->high_priority_cnt++] = &peer->key;
+      }
+      else if( peer->ewma_rtt < 100000000UL ) { /* 50-100ms */
+        recorder->medium_priority_peers[recorder->medium_priority_cnt++] = &peer->key;
+      }
+      else { /* >= 100ms */
+        recorder->low_priority_peers[recorder->low_priority_cnt++] = &peer->key;
+      }
+      
+    }
   
     FD_LOG_INFO(( "Reshuffled peers - High: %lu, Medium: %lu, Low: %lu, Zero HR: %lu",
                   recorder->high_priority_cnt, recorder->medium_priority_cnt,
@@ -604,8 +608,6 @@ fd_recorder_select_peers(fd_recorder_t * recorder, uint num_peers, fd_pubkey_t *
   
   /* Check if we need to reshuffle (every 10 cycles) */
   if( FD_UNLIKELY( recorder->cycle_position == 0 && (recorder->cycle_count % 10) == 0 ) ) {
-    /* Need to upgrade to write lock for reshuffling */
-    /* This is a simplified approach - in production you might want to handle lock upgrades differently */
     fd_recorder_reshuffle_peers( recorder );
   }
   
