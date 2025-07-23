@@ -260,11 +260,7 @@ handle_new_cluster_contact_info( fd_repair_tile_ctx_t * ctx,
     fd_recorder_peer_t * peer = fd_recorder_peer_query( ctx->recorder, in_dests[i].pubkey );
     fd_rwlock_unread( &ctx->recorder->rw_lock );
 
-    if (peer) {
-      fd_repair_send_request(ctx, ctx->stem, ctx->repair, 0, 0, 0, in_dests[i].pubkey, fd_log_wallclock());
-      // FD_LOG_INFO(("Sent pong to peer: time: %lu", (ulong)fd_log_wallclock()));
-   
-    } else {
+    if (!peer) {
       fd_rwlock_write( &ctx->recorder->rw_lock );
       fd_recorder_peer_add(
           ctx->recorder, 
@@ -272,6 +268,7 @@ handle_new_cluster_contact_info( fd_repair_tile_ctx_t * ctx,
           (fd_ip4_port_t){ .addr = in_dests[i].ip4_addr, .port = repair_peer.port },
           fd_log_wallclock() 
       );
+      fd_repair_send_request(ctx, ctx->stem, ctx->repair, 0, 0, 0, in_dests[i].pubkey, fd_log_wallclock());
       fd_rwlock_unwrite( &ctx->recorder->rw_lock );
     }
 
@@ -444,7 +441,6 @@ fd_repair_send_request( fd_repair_tile_ctx_t   * repair_tile_ctx,
   send_packet( repair_tile_ctx, stem, 1, peer->ip4.addr, peer->ip4.port, src_ip4_addr, buf, buflen, tsorig );
 
   if (slot!=0) {
-      // fd_rwlock_write( &repair_tile_ctx->recorder->rw_lock );
       fd_recorder_req_insert(
       repair_tile_ctx->recorder,
                               nonce,
@@ -455,7 +451,6 @@ fd_repair_send_request( fd_repair_tile_ctx_t   * repair_tile_ctx,
                               shred_index,
                               type
     );
-    // fd_rwlock_unwrite( &repair_tile_ctx->recorder->rw_lock );
     // FD_LOG_INFO(("Insert req to peer: %s, nonce: %lu, slot: %lu, shred_idx: %u, type: %u", FD_BASE58_ENC_32_ALLOCA(recipient), nonce, slot, shred_index, type));
   }
 }
@@ -468,18 +463,17 @@ fd_repair_send_requests( fd_repair_tile_ctx_t *   ctx,
                          uint                     shred_index,
                          long                     now ){
   fd_repair_t * glob = ctx->repair;
+  fd_pubkey_t * selected_peers[FD_REPAIR_NUM_NEEDED_PEERS];
 
-fd_pubkey_t * selected_peers[FD_REPAIR_NUM_NEEDED_PEERS];
   fd_rwlock_write( &ctx->recorder->rw_lock );
   fd_recorder_select_peers(ctx->recorder, FD_REPAIR_NUM_NEEDED_PEERS, selected_peers);
 
-for( uint i=0; i<FD_REPAIR_NUM_NEEDED_PEERS; i++ ) {
-    if( !selected_peers[i] ) break;
-    fd_repair_send_request( ctx, stem, glob, type, slot, shred_index, selected_peers[i], now );
-      // FD_LOG_INFO(("Sent request to peer: time: %lu", (ulong)fd_log_wallclock()));
-}
-fd_rwlock_unwrite( &ctx->recorder->rw_lock );
-
+  for( uint i=0; i<FD_REPAIR_NUM_NEEDED_PEERS; i++ ) {
+      if( !selected_peers[i] ) break;
+      fd_repair_send_request( ctx, stem, glob, type, slot, shred_index, selected_peers[i], now );
+        // FD_LOG_INFO(("Sent request to peer: time: %lu", (ulong)fd_log_wallclock()));
+  }
+  fd_rwlock_unwrite( &ctx->recorder->rw_lock );
 
 }
 
