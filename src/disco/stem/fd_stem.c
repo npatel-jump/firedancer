@@ -443,6 +443,9 @@ STEM_(run1)( ulong                        in_cnt,
       then = now + (long)fd_tempo_async_reload( rng, async_min );
       long next = fd_tickcount();
       housekeeping_ticks = (ulong)(next - now);
+      for (ulong i = 0; i < 8; i++) {
+        FD_LOG_INFO(("metric_regime_ticks[%lu]: %lu", i, metric_regime_ticks[i]));
+      }
       now = next;
     }
 

@@ -85,7 +85,6 @@ typedef struct fd_reasm fd_reasm_t;
 struct fd_repair_tile_ctx {
   long tsprint; /* timestamp for printing */
   long tsrepair; /* timestamp for repair */
-  long tsreset; /* timestamp for resetting iterator */
   ulong * wmark;
   ulong   prev_wmark;
 
@@ -104,7 +103,7 @@ struct fd_repair_tile_ctx {
   fd_fec_sig_t     * fec_sigs;
   fd_reasm_t       * reasm;
   fd_fec_chainer_t * fec_chainer;
-  fd_forest_iter_t   repair_iter;
+  fd_forest_fast_iter_t   repair_iter;
 
   ulong * turbine_slot0;
   ulong * turbine_slot;
@@ -840,7 +839,7 @@ after_frag( fd_repair_tile_ctx_t * ctx,
       fd_forest_publish( ctx->forest, wmark );
       ctx->prev_wmark  = wmark;
       // invalidate our repair iterator
-      ctx->repair_iter = fd_forest_iter_init( ctx->forest );
+      ctx->repair_iter = fd_forest_fast_iter_init( ctx->forest );
     }
 
     if( FD_UNLIKELY( shred->slot <= fd_forest_root_slot( ctx->forest ) ) ) {
@@ -992,7 +991,7 @@ after_credit( fd_repair_tile_ctx_t * ctx,
   *charge_busy = 1;
 
   fd_rwlock_write( &ctx->recorder->rw_lock );
-  fd_recorder_req_expire(ctx->recorder, (ulong)fd_log_wallclock(), 0);
+  ulong expired_cnt = fd_recorder_req_expire(ctx->recorder, (ulong)fd_log_wallclock(), 0);
   fd_rwlock_unwrite( &ctx->recorder->rw_lock );
 
   if( FD_UNLIKELY( ctx->forest->root == ULONG_MAX ) ) return;
@@ -1020,8 +1019,8 @@ after_credit( fd_repair_tile_ctx_t * ctx,
 
   int total_req = 0;
   for( fd_forest_orphaned_iter_t iter = fd_forest_orphaned_iter_init( orphaned, pool );
-        !fd_forest_orphaned_iter_done( iter, orphaned, pool );
-        iter = fd_forest_orphaned_iter_next( iter, orphaned, pool ) ) {
+       !fd_forest_orphaned_iter_done( iter, orphaned, pool );
+       iter = fd_forest_orphaned_iter_next( iter, orphaned, pool ) ) {
     fd_forest_ele_t * orphan = fd_forest_orphaned_iter_ele( iter, orphaned, pool );
     if( fd_repair_need_orphan( ctx->repair, orphan->slot ) ) {
       fd_repair_send_requests( ctx, stem, fd_needed_orphan, orphan->slot, UINT_MAX, now );
@@ -1036,22 +1035,23 @@ after_credit( fd_repair_tile_ctx_t * ctx,
 
   // Travel down frontier
 
-  /* Every so often we'll need to reset the frontier iterator to the
-     head of frontier, because we could end up traversing down a very
-     long tree if we are far behind. */
+  /* Only reset the iterator when requests have expired (req_expire > 0).
+     This allows the iterator to continue from its current position even
+     when the forest structure changes. */
 
-  if( FD_UNLIKELY( now - ctx->tsreset > (long)100e6 ) ) {
+  if( FD_UNLIKELY( expired_cnt > 0 ) ) {
     // reset iterator to the beginning of the forest frontier
-    ctx->repair_iter = fd_forest_iter_init( ctx->forest );
-    ctx->tsreset = now;
+    ctx->repair_iter = fd_forest_fast_iter_init( ctx->forest );
   }
+
+
 
   /* We are at the head of the turbine, so we should give turbine the
      chance to complete the shreds. !ele handles an edgecase where all
      frontier are fully complete and the iter is done */
 
   fd_forest_ele_t const * ele = fd_forest_pool_ele_const( pool, ctx->repair_iter.ele_idx );
-  if( FD_LIKELY( !ele || ( ele->slot == fd_fseq_query( ctx->turbine_slot ) && ( now - ctx->tsreset ) < (long)30e6 ) ) ){
+  if( FD_LIKELY( !ele || ( ele->slot == fd_fseq_query( ctx->turbine_slot ) ) ) ){
     return;
   }
 
@@ -1066,12 +1066,12 @@ after_credit( fd_repair_tile_ctx_t * ctx,
       total_req += FD_REPAIR_NUM_NEEDED_PEERS;
     }
 
-    ctx->repair_iter = fd_forest_iter_next( ctx->repair_iter, forest );
+    ctx->repair_iter = fd_forest_fast_iter_next( ctx->repair_iter, forest );
 
-    if( FD_UNLIKELY( fd_forest_iter_done( ctx->repair_iter, forest ) ) ) {
+    if( FD_UNLIKELY( fd_forest_fast_iter_done( ctx->repair_iter, forest ) ) ) {
       /* No more elements in the forest frontier, or the iterator got
          invalidated, so we can start from top again. */
-      ctx->repair_iter = fd_forest_iter_init( forest );
+      ctx->repair_iter = fd_forest_fast_iter_init( forest );
       break;
     }
   }
@@ -1126,7 +1126,6 @@ unprivileged_init( fd_topo_t *      topo,
   fd_repair_tile_ctx_t * ctx = FD_SCRATCH_ALLOC_APPEND( l, alignof(fd_repair_tile_ctx_t), sizeof(fd_repair_tile_ctx_t) );
   ctx->tsprint  = fd_log_wallclock();
   ctx->tsrepair = fd_log_wallclock();
-  ctx->tsreset  = fd_log_wallclock();
 
   if( FD_UNLIKELY( tile->in_cnt > MAX_IN_LINKS ) ) FD_LOG_ERR(( "repair tile has too many input links" ));
 
@@ -1274,8 +1273,8 @@ unprivileged_init( fd_topo_t *      topo,
   ctx->fec_sigs = fd_fec_sig_join( fd_fec_sig_new( ctx->fec_sigs, 20 ) );
   ctx->reasm = fd_reasm_join( fd_reasm_new( ctx->reasm, 20 ) );
   ctx->fec_chainer = fd_fec_chainer_join( fd_fec_chainer_new( ctx->fec_chainer, 1 << 20, 0 ) );
-  ctx->repair_iter = fd_forest_iter_init( ctx->forest );
-  FD_TEST( fd_forest_iter_done( ctx->repair_iter, ctx->forest ) );
+  ctx->repair_iter = fd_forest_fast_iter_init( ctx->forest );
+  FD_TEST( fd_forest_fast_iter_done( ctx->repair_iter, ctx->forest ) );
 
   /**********************************************************************/
   /* turbine_slot fseq                                                  */
