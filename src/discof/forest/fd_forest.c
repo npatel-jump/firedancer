@@ -595,6 +595,135 @@ fd_forest_iter_done( fd_forest_iter_t iter, fd_forest_t const * forest ) {
   return iter.ele_idx == fd_forest_pool_idx_null( pool ); /* no more elements */
 }
 
+fd_forest_fast_iter_t
+fd_forest_fast_iter_init( fd_forest_t * forest ) {
+  /* Find first element. Anything on the frontier. */
+  fd_forest_ele_t      const * pool     = fd_forest_pool_const( forest );
+  fd_forest_frontier_t const * frontier = fd_forest_frontier_const( forest );
+  ulong                        null_idx = fd_forest_pool_idx_null( pool );
+
+  /* Find the first valid frontier element */
+  for( fd_forest_frontier_iter_t frontier_iter = fd_forest_frontier_iter_init( frontier, pool );
+       !fd_forest_frontier_iter_done( frontier_iter, frontier, pool );
+       frontier_iter = fd_forest_frontier_iter_next( frontier_iter, frontier, pool ) ) {
+    
+    fd_forest_ele_t const * ele = fd_forest_frontier_iter_ele_const( frontier_iter, frontier, pool );
+    
+    /* Skip completed frontier nodes */
+    if( ele->complete_idx != UINT_MAX && ele->buffered_idx == ele->complete_idx ) {
+      continue;
+    }
+    
+    /* Found a valid starting point */
+    fd_forest_fast_iter_t iter;
+    iter.ele_idx   = frontier_iter.ele_idx;
+    iter.shred_idx = ele->complete_idx == UINT_MAX ? UINT_MAX : ele->buffered_idx + 1;
+    return iter;
+  }
+  
+  /* No valid frontier elements found */
+  fd_forest_fast_iter_t iter;
+  iter.ele_idx   = null_idx;
+  iter.shred_idx = UINT_MAX;
+  return iter;
+}
+
+fd_forest_fast_iter_t
+fd_forest_fast_iter_next( fd_forest_fast_iter_t iter, fd_forest_t const * forest ) {
+  fd_forest_frontier_t const * frontier = fd_forest_frontier_const( forest );
+  fd_forest_ele_t const      * pool     = fd_forest_pool_const( forest );
+  ulong                        null_idx = fd_forest_pool_idx_null( pool );
+  
+  if( iter.ele_idx == null_idx ) return iter; /* Already done */
+  
+  fd_forest_ele_t const * ele = fd_forest_pool_ele_const( pool, iter.ele_idx );
+
+  uint next_shred_idx = iter.shred_idx;
+  for(;;) {
+    next_shred_idx++;
+
+    /* Case 1: No more shreds in this slot to request, move to the
+       next one. Wraparound the shred_idx.
+
+       Case 2: original iter.shred_idx == UINT_MAX (implies prev req
+       was a highest_window_idx request). Also requires moving to next
+       slot and wrapping the shred_idx. */
+
+    if( FD_UNLIKELY( next_shred_idx >= ele->complete_idx || iter.shred_idx == UINT_MAX ) ) {
+      /* Try to move to child */
+      iter.ele_idx = ele->child;
+      
+      if( FD_UNLIKELY( iter.ele_idx == null_idx ) ) {
+        /* No child - try to find next frontier element starting from current slot */
+        ulong current_slot = ele->slot;
+        
+        /* Search for next frontier element with slot > current_slot */
+        fd_forest_ele_t const * next_frontier = NULL;
+        ulong min_slot = ULONG_MAX;
+        
+        for( fd_forest_frontier_iter_t frontier_iter = fd_forest_frontier_iter_init( frontier, pool );
+             !fd_forest_frontier_iter_done( frontier_iter, frontier, pool );
+             frontier_iter = fd_forest_frontier_iter_next( frontier_iter, frontier, pool ) ) {
+          
+          fd_forest_ele_t const * frontier_ele = fd_forest_frontier_iter_ele_const( frontier_iter, frontier, pool );
+          
+          /* Skip completed frontier nodes */
+          if( frontier_ele->complete_idx != UINT_MAX && frontier_ele->buffered_idx == frontier_ele->complete_idx ) {
+            continue;
+          }
+          
+          /* Find the next frontier element with smallest slot > current_slot */
+          if( frontier_ele->slot > current_slot && frontier_ele->slot < min_slot ) {
+            next_frontier = frontier_ele;
+            min_slot = frontier_ele->slot;
+          }
+        }
+        
+        if( !next_frontier ) {
+          /* No more frontier elements - we're done */
+          iter.ele_idx   = null_idx;
+          iter.shred_idx = UINT_MAX;
+          return iter;
+        }
+        
+        /* Continue with the next frontier element */
+        iter.ele_idx = fd_forest_pool_idx( pool, next_frontier );
+        ele = next_frontier;
+      } else {
+        /* Moved to child */
+        ele = fd_forest_pool_ele_const( pool, iter.ele_idx );
+      }
+      
+      next_shred_idx = ele->buffered_idx + 1;
+    }
+
+    /* Common case - valid shred to request. Note you can't know the
+       ele->complete_idx until you have actually received the slot
+       complete shred, thus we can do lt instead of leq  */
+
+    if( ele->complete_idx != UINT_MAX &&
+        next_shred_idx < ele->complete_idx &&
+        !fd_forest_ele_idxs_test( ele->idxs, next_shred_idx ) ) {
+      iter.shred_idx = next_shred_idx;
+      break;
+    }
+
+    /* Current slot actually needs a highest_window_idx request */
+
+    if( FD_UNLIKELY( ele->complete_idx == UINT_MAX ) ) {
+      iter.shred_idx = UINT_MAX;
+      break;
+    }
+  }
+  return iter;
+}
+
+int
+fd_forest_fast_iter_done( fd_forest_fast_iter_t iter, fd_forest_t const * forest ) {
+  fd_forest_ele_t const * pool = fd_forest_pool_const( forest );
+  return iter.ele_idx == fd_forest_pool_idx_null( pool ); /* no more elements */
+}
+
 #include <stdio.h>
 
 static void
