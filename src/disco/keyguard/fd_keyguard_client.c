@@ -39,12 +39,15 @@ fd_keyguard_client_sign( fd_keyguard_client_t * client,
                          int                    sign_type ) {
   FD_TEST( sign_data_len<=client->request_mtu );
 
+  // MUST copy data to shared memory chunk
   uchar * dst = fd_chunk_to_laddr( client->request_mem, client->request_chunk );
   fd_memcpy( dst, sign_data, sign_data_len );
 
   ulong sig = (ulong)(uint)sign_type;
+  // MUST use valid chunk, not 0UL
   fd_mcache_publish( client->request, client->request_depth, client->request_seq, sig, client->request_chunk, sign_data_len, 0UL, 0UL, 0UL );
-  client->request_seq   = fd_seq_inc( client->request_seq, 1UL );
+  client->request_seq = fd_seq_inc( client->request_seq, 1UL );
+  // MUST advance chunk pointer
   client->request_chunk = fd_dcache_compact_next( client->request_chunk, sign_data_len, client->request_chunk0, client->request_wmark );
 
   fd_frag_meta_t meta;
@@ -63,7 +66,80 @@ fd_keyguard_client_sign( fd_keyguard_client_t * client,
 
   uchar * src = fd_chunk_to_laddr( client->response_mem, chunk );
   fd_memcpy( signature, src, 64UL );
+  seq_found = fd_frag_meta_seq_query( mline );
+  if( FD_UNLIKELY( fd_seq_ne( seq_found, client->response_seq ) ) ) FD_LOG_ERR(( "sign request was overrun while reading" ));
+  client->response_seq = fd_seq_inc( client->response_seq, 1UL );
+}
 
+
+/* fd_keyguard_client_sign_async sends a remote signing request without
+   blocking. Returns the sequence number of the request which can be
+   used to correlate with the response. */
+ulong
+fd_keyguard_client_sign_async( fd_keyguard_client_t * client,
+                                uchar *                signature FD_PARAM_UNUSED,
+                                uchar const *          sign_data,
+                                ulong                  sign_data_len,
+                                int                    sign_type,
+                                ulong                  nonce) {
+    FD_TEST( sign_data_len<=client->request_mtu );
+
+    // MUST copy data to shared memory chunk
+    uchar * dst = fd_chunk_to_laddr( client->request_mem, client->request_chunk );
+    fd_memcpy( dst, sign_data, sign_data_len );
+
+    ulong seq = client->request_seq;
+    ulong sig = (nonce << 32) | (ulong)(uint)sign_type;
+
+    fd_mcache_publish( client->request, client->request_depth, seq, sig, client->request_chunk, sign_data_len, 0UL, 0UL, 0UL );
+    client->request_seq = fd_seq_inc( client->request_seq, 1UL );
+    // MUST advance chunk pointer
+    client->request_chunk = fd_dcache_compact_next( client->request_chunk, sign_data_len, client->request_chunk0, client->request_wmark );
+    
+   //  FD_LOG_INFO(( "sign request sent with sequence number %lu", seq ));
+    return seq;
+}
+
+void
+fd_keyguard_client_sign_with_nonce( fd_keyguard_client_t * client,
+                         uchar *                signature,
+                         uchar const *          sign_data,
+                         ulong                  sign_data_len,
+                         int                    sign_type,
+                         ulong                  nonce ) {
+  FD_TEST( sign_data_len<=client->request_mtu );
+
+  // MUST copy data to shared memory chunk
+  uchar * dst = fd_chunk_to_laddr( client->request_mem, client->request_chunk );
+  fd_memcpy( dst, sign_data, sign_data_len );
+
+  ulong sig = (nonce << 32) | (ulong)(uint)sign_type;
+  // MUST use valid chunk, not 0UL
+  fd_mcache_publish( client->request, client->request_depth, client->request_seq, sig, client->request_chunk, sign_data_len, 0UL, 0UL, 0UL );
+  client->request_seq = fd_seq_inc( client->request_seq, 1UL );
+  // MUST advance chunk pointer
+  client->request_chunk = fd_dcache_compact_next( client->request_chunk, sign_data_len, client->request_chunk0, client->request_wmark );
+
+  fd_frag_meta_t meta;
+  fd_frag_meta_t const * mline;
+  ulong seq_found;
+  long seq_diff;
+  ulong poll_max = ULONG_MAX;
+  FD_MCACHE_WAIT( &meta, mline, seq_found, seq_diff, poll_max, client->response, client->response_depth, client->response_seq );
+  if( FD_UNLIKELY( !poll_max ) ) FD_LOG_ERR(( "sign request timed out while polling" ));
+  if( FD_UNLIKELY( seq_diff ) ) FD_LOG_ERR(( "sign request was overrun while polling" ));
+
+  sig = FD_VOLATILE_CONST( mline->sig );
+//   ulong new_nonce = sig >> 32;
+//   FD_LOG_INFO(( "SYNC: sign request nonce: expected %lu, got %lu", nonce, new_nonce ));
+
+  /* Chunk is in shared memory and might be be written to by an
+     attacking tile after we validate it, so load once. */
+  ulong chunk = FD_VOLATILE_CONST( mline->chunk );
+  FD_TEST( chunk>=client->response_chunk0 && chunk<=client->response_wmark );
+
+  uchar * src = fd_chunk_to_laddr( client->response_mem, chunk );
+  fd_memcpy( signature, src, 64UL );
   seq_found = fd_frag_meta_seq_query( mline );
   if( FD_UNLIKELY( fd_seq_ne( seq_found, client->response_seq ) ) ) FD_LOG_ERR(( "sign request was overrun while reading" ));
   client->response_seq = fd_seq_inc( client->response_seq, 1UL );

@@ -204,8 +204,8 @@ after_frag_sensitive( void *              _ctx,
 
   sign_duration += fd_tickcount();
   fd_histf_sample( ctx->sign_duration, (ulong)sign_duration );
-
-  fd_stem_publish( stem, in_idx, 0UL, ctx->out[ in_idx ].out_chunk, 64UL, 0UL, tsorig, 0UL );
+  // FD_LOG_INFO(("in_idx: %lu, sig: %lu, out_chunk: %lu", in_idx, sig, ctx->out[ in_idx ].out_chunk));
+  fd_stem_publish( stem, in_idx, sig, ctx->out[ in_idx ].out_chunk, 64UL, 0UL, tsorig, 0UL );
   ctx->out[ in_idx ].out_chunk = fd_dcache_compact_next( ctx->out[ in_idx ].out_chunk, 64UL, ctx->out[ in_idx ].out_chunk0, ctx->out[ in_idx ].out_wmark );
 }
 

@@ -95,6 +95,22 @@ fd_keyguard_client_sign( fd_keyguard_client_t * client,
                          ulong                  sign_data_len,
                          int                    sign_type );
 
+ulong
+fd_keyguard_client_sign_async( fd_keyguard_client_t * client,
+                               uchar *                signature,
+                               uchar const *          sign_data,
+                               ulong                  sign_data_len,
+                               int                    sign_type,
+                               ulong                  nonce );
+
+void
+fd_keyguard_client_sign_with_nonce( fd_keyguard_client_t * client,
+    uchar *                signature,
+    uchar const *          sign_data,
+    ulong                  sign_data_len,
+    int                    sign_type,
+    ulong                  nonce );
+
 FD_PROTOTYPES_END
 
 #endif /* HEADER_fd_src_disco_keyguard_fd_keyguard_client_h */

@@ -82,6 +82,39 @@ typedef struct fd_reasm fd_reasm_t;
 #define MAP_MEMOIZE  0
 #include "../../util/tmpl/fd_map_dynamic.c"
 
+
+enum fd_repair_msg_type {
+  FD_REPAIR_MSG_TYPE_REPAIR_REQUEST,
+  FD_REPAIR_MSG_TYPE_PING,
+  FD_REPAIR_MSG_TYPE_PONG
+};
+
+struct fd_repair_pending_sign_req {
+  ulong seq;
+  long timestamp;
+  uchar buf[1024];
+  ulong buflen;
+  fd_repair_protocol_t protocol;
+  fd_repair_response_t gmsg;
+  ulong sig_offset;
+  uint dst_ip_addr;
+  ushort dst_port;
+  ulong nonce;
+  ulong slot;
+  uint shred_index;
+  enum fd_needed_elem_type type;
+  fd_pubkey_t recipient;
+  fd_ip4_port_t ip4;
+  enum fd_repair_msg_type msg_type;
+  int is_intake;           /* 1 for intake, 0 for serve */
+};
+typedef struct fd_repair_pending_sign_req fd_repair_pending_sign_req_t;
+
+#define DEQUE_NAME fd_repair_pending_sign_req_deque
+#define DEQUE_T    fd_repair_pending_sign_req_t
+#define DEQUE_MAX  8192UL
+#include "../../util/tmpl/fd_deque.c"
+
 struct fd_repair_tile_ctx {
   long tsprint; /* timestamp for printing */
   long tsrepair; /* timestamp for repair */
@@ -151,8 +184,8 @@ struct fd_repair_tile_ctx {
 
   uint idx;
 
-  volatile ulong up_cnt_cred;
-  volatile ulong up_cnt_frag;
+  fd_repair_pending_sign_req_t * pending_sign_req_deque;
+  
 };
 typedef struct fd_repair_tile_ctx fd_repair_tile_ctx_t;
 
@@ -177,6 +210,7 @@ scratch_footprint( fd_topo_tile_t const * tile ) {
   l = FD_LAYOUT_APPEND( l, fd_reasm_align(),              fd_reasm_footprint( 20 ) );
   // l = FD_LAYOUT_APPEND( l, fd_fec_repair_align(),         fd_fec_repair_footprint( ( 1<<20 ), tile->repair.shred_tile_cnt ) );
   l = FD_LAYOUT_APPEND( l, fd_fec_chainer_align(),        fd_fec_chainer_footprint( 1 << 20 ) ); // TODO: fix this
+  l = FD_LAYOUT_APPEND( l, fd_repair_pending_sign_req_deque_align(), fd_repair_pending_sign_req_deque_footprint() );
   l = FD_LAYOUT_APPEND( l, fd_scratch_smem_align(),       fd_scratch_smem_footprint( FD_REPAIR_SCRATCH_MAX ) );
   l = FD_LAYOUT_APPEND( l, fd_scratch_fmem_align(),       fd_scratch_fmem_footprint( FD_REPAIR_SCRATCH_DEPTH ) );
   return FD_LAYOUT_FINI( l, scratch_align() );
@@ -187,10 +221,13 @@ repair_signer( void *        signer_ctx,
                uchar         signature[ static 64 ],
                uchar const * buffer,
                ulong         len,
-               int           sign_type ) {
+               int           sign_type,
+               ulong         nonce) {
   fd_repair_tile_ctx_t * ctx = (fd_repair_tile_ctx_t *) signer_ctx;
-  fd_keyguard_client_sign( ctx->keyguard_client, signature, buffer, len, sign_type );
+  fd_keyguard_client_sign_async( ctx->keyguard_client, signature, buffer, len, sign_type, nonce );
 }
+
+
 
 static void
 send_packet( fd_repair_tile_ctx_t * ctx,
@@ -228,15 +265,247 @@ send_packet( fd_repair_tile_ctx_t * ctx,
   ctx->net_out_chunk = fd_dcache_compact_next( chunk, packet_sz, ctx->net_out_chunk0, ctx->net_out_wmark );
 }
 
+
+// static ulong
+// fd_repair_sign_and_send( fd_repair_tile_ctx_t *  repair_tile_ctx,
+//                          fd_repair_protocol_t *  protocol,
+//                          fd_gossip_peer_addr_t * addr FD_PARAM_UNUSED,
+//                          uchar                 * buf,
+//                          ulong                   buflen,
+//                          uint                    nonce) {
+
+//   FD_TEST( buflen >= 1024UL );
+//   fd_bincode_encode_ctx_t ctx = { .data = buf, .dataend = buf + buflen };
+//   if( FD_UNLIKELY( fd_repair_protocol_encode( protocol, &ctx ) != FD_BINCODE_SUCCESS ) ) {
+//     FD_LOG_CRIT(( "Failed to encode repair message (type %#x)", protocol->discriminant ));
+//   }
+
+//   buflen = (ulong)ctx.data - (ulong)buf;
+//   if( FD_UNLIKELY( buflen<68 ) ) {
+//     FD_LOG_CRIT(( "Attempted to sign unsigned repair message type (type %#x)", protocol->discriminant ));
+//   }
+
+//   /* At this point buffer contains
+
+//      [ discriminant ] [ signature ] [ payload ]
+//      ^                ^             ^
+//      0                4             68 */
+
+//   /* https://github.com/solana-labs/solana/blob/master/core/src/repair/serve_repair.rs#L1258 */
+
+//   fd_memcpy( buf+64, buf, 4 );
+//   buf    += 64UL;
+//   buflen -= 64UL;
+
+//   /* Now it contains
+
+//      [ discriminant ] [ payload ]
+//      ^                ^
+//      buf              buf+4 */
+
+//   fd_signature_t sig;
+//   repair_signer( repair_tile_ctx, sig.uc, buf, buflen, FD_KEYGUARD_SIGN_TYPE_ED25519,  nonce);
+//   /* Reintroduce the signature */
+
+//   buf    -= 64UL;
+//   buflen += 64UL;
+//   fd_memcpy( buf + 4U, &sig, 64U );
+
+//   return buflen;
+// }
+
+
+
+// static void
+// fd_repair_send_request( fd_repair_tile_ctx_t   * repair_tile_ctx,
+//                         fd_stem_context_t      * stem,
+//                         fd_repair_t            * glob,
+//                         enum fd_needed_elem_type type,
+//                         ulong                    slot,
+//                         uint                     shred_index,
+//                         fd_pubkey_t const      * recipient,
+//                         long                     now ) {
+
+//   /* Send requests starting where we left off last time. i.e. if n < current_nonce, seek forward */
+//   /* Track statistics */
+//   fd_recorder_peer_t * peer = fd_recorder_peer_query( repair_tile_ctx->recorder, recipient );
+//   if (!peer) { return; }
+
+//   uint nonce = (uint)glob->next_nonce;
+  
+//   fd_repair_protocol_t protocol;
+//   fd_repair_construct_request_protocol( glob, &protocol, type, slot, shred_index, recipient, nonce, now );
+//   glob->next_nonce++;
+//   glob->metrics.send_pkt_cnt++;
+
+//   FD_LOG_INFO(("SYNC REQ START: nonce=%u type=%u slot=%lu shred_idx=%u ip=%u port=%u peer=%s", 
+//                nonce, type, slot, shred_index, peer->ip4.addr, peer->ip4.port, FD_BASE58_ENC_32_ALLOCA(recipient)));
+
+//   uchar buf[1024];
+//   ulong buflen       = fd_repair_sign_and_send( repair_tile_ctx, &protocol, &peer->ip4, buf, sizeof(buf), nonce );
+//   ulong tsorig       = fd_frag_meta_ts_comp( fd_tickcount() );
+//   uint  src_ip4_addr = 0U; /* unknown */
+
+//   FD_LOG_INFO(("SYNC REQ END: nonce=%u ip=%u port=%u buflen=%lu discriminant=%02x%02x%02x%02x payload[0-19]=%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x", 
+//                nonce, peer->ip4.addr, peer->ip4.port, buflen,
+//                buf[0], buf[1], buf[2], buf[3],                                              // discriminant (4 bytes)
+//                buf[68], buf[69], buf[70], buf[71], buf[72], buf[73], buf[74], buf[75],     // payload bytes 0-7
+//                buf[76], buf[77], buf[78], buf[79], buf[80], buf[81], buf[82], buf[83],     // payload bytes 8-15
+//                buf[84], buf[85], buf[86], buf[87]));                                        // payload bytes 16-19
+//   send_packet( repair_tile_ctx, stem, 1, peer->ip4.addr, peer->ip4.port, src_ip4_addr, buf, buflen, tsorig );
+  
+//   if (slot!=0) {
+//       fd_recorder_req_insert(
+//       repair_tile_ctx->recorder,
+//                               nonce,
+//                               (ulong)now,
+//                               recipient,
+//                               peer->ip4,
+//                               slot,
+//                               shred_index,
+//                               type
+//     );
+//   }
+// }
+
+
 static void
-fd_repair_send_request( fd_repair_tile_ctx_t   * repair_tile_ctx,
-                        fd_stem_context_t      * stem,
-                        fd_repair_t            * glob,
-                        enum fd_needed_elem_type type,
-                        ulong                    slot,
-                        uint                     shred_index,
-                        fd_pubkey_t const      * recipient,
-                        long                     now );
+fd_repair_send_request_async( fd_repair_tile_ctx_t *   ctx,
+                              fd_stem_context_t *      stem FD_PARAM_UNUSED,
+                              fd_repair_t *            glob,
+                              enum fd_needed_elem_type type,
+                              ulong                    slot,
+                              uint                     shred_index,
+                              fd_pubkey_t const      * recipient,
+                              long                     now ){
+    fd_recorder_peer_t * peer = fd_recorder_peer_query( ctx->recorder, recipient );
+    if (!peer) return;
+  
+    uint nonce = (uint)glob->next_nonce;
+
+    fd_repair_protocol_t protocol;
+    // uint a = 1;
+    // ulong b = 39748572859683;
+    // uint c = 1035;
+    // uint d = 99;
+    // long e = 12345678910;
+    // FD_LOG_INFO(("ASYNC REQ PUBKEY: %s", FD_BASE58_ENC_32_ALLOCA(recipient)));
+    // fd_repair_construct_request_protocol( glob, &protocol, a, b, c, recipient, d, e);
+    fd_repair_construct_request_protocol( glob, &protocol, type, slot, shred_index, recipient, glob->next_nonce, now );
+    // FD_LOG_HEXDUMP_INFO(("ASYNC REQ START: ", &protocol, sizeof(protocol)));
+    glob->next_nonce++;
+    glob->metrics.send_pkt_cnt++;
+  
+    // FD_LOG_INFO(("ASYNC REQ START: nonce=%u type=%u slot=%lu shred_idx=%u ip=%u port=%u peer=%s", 
+    //              nonce, type, slot, shred_index, peer->ip4.addr, peer->ip4.port, FD_BASE58_ENC_32_ALLOCA(recipient)));
+  
+    if( FD_UNLIKELY( fd_repair_pending_sign_req_deque_full( ctx->pending_sign_req_deque ) ) ) {
+        // FD_LOG_WARNING(( "Pending sign request deque is full, dropping request" ));
+        return;
+    }
+    
+    fd_repair_pending_sign_req_t * pending = fd_repair_pending_sign_req_deque_push_tail_nocopy( ctx->pending_sign_req_deque );
+    
+    // Inline the buffer preparation logic from fd_repair_sign_and_send
+    FD_TEST( sizeof(pending->buf) >= 1024UL );
+    fd_bincode_encode_ctx_t encode_ctx = { .data = pending->buf, .dataend = pending->buf + sizeof(pending->buf) };
+    if( FD_UNLIKELY( fd_repair_protocol_encode( &protocol, &encode_ctx ) != FD_BINCODE_SUCCESS ) ) {
+        FD_LOG_CRIT(( "Failed to encode repair message (type %#x)", protocol.discriminant ));
+    }
+    
+    ulong buflen = (ulong)encode_ctx.data - (ulong)pending->buf;
+    if( FD_UNLIKELY( buflen<68 ) ) {
+        FD_LOG_CRIT(( "Attempted to sign unsigned repair message type (type %#x)", protocol.discriminant ));
+    }
+    
+    /* At this point buffer contains
+       [ discriminant ] [ signature_placeholder ] [ payload ]
+       ^                ^                        ^
+       0                4                        68 */
+    
+    /* Move discriminant to position 64 for signing (same as sync version) */
+    fd_memcpy( pending->buf+64, pending->buf, 4 );
+    uchar * sign_buf = pending->buf + 64;
+    ulong sign_len = buflen - 64;
+
+    /*
+    now it contains
+    [ discriminant ] [ payload ]
+    ^                ^
+    buf              buf+4
+    */
+    // FD_LOG_HEXDUMP_INFO(("ASYNC REQ SIGN: ", sign_buf, sign_len));
+    pending->seq = fd_keyguard_client_sign_async( ctx->keyguard_client, NULL, sign_buf, sign_len, FD_KEYGUARD_SIGN_TYPE_ED25519, nonce);
+    
+    
+    pending->timestamp   = now;
+    pending->buflen      = buflen;
+    pending->sig_offset  = 4;
+    pending->dst_ip_addr = peer->ip4.addr;
+    pending->dst_port    = peer->ip4.port;
+    pending->nonce       = nonce;
+    pending->slot        = slot;
+    pending->shred_index = shred_index;
+    pending->type        = type;
+    pending->recipient   = *recipient;
+    pending->ip4         = peer->ip4;
+    pending->msg_type    = FD_REPAIR_MSG_TYPE_REPAIR_REQUEST;
+    pending->is_intake   = 1;       /* Intake port for repair requests */
+    
+    if (slot!=0) {
+        fd_recorder_req_insert(
+            ctx->recorder,
+            nonce,
+            (ulong)now,
+            recipient,
+            peer->ip4,
+            slot,
+            shred_index,
+            type
+        );
+    }
+}
+
+// static void
+// fd_repair_send_requests( fd_repair_tile_ctx_t *   ctx,
+//                          fd_stem_context_t *      stem,
+//                          enum fd_needed_elem_type type,
+//                          ulong                    slot,
+//                          uint                     shred_index,
+//                          long                     now ){
+//   fd_repair_t * glob = ctx->repair;
+
+//   fd_pubkey_t * selected_peers[FD_REPAIR_NUM_NEEDED_PEERS];
+//   fd_rwlock_write( &ctx->recorder->rw_lock );
+//   fd_recorder_select_peers(ctx->recorder, FD_REPAIR_NUM_NEEDED_PEERS, selected_peers);
+
+//   for( uint i=0; i<FD_REPAIR_NUM_NEEDED_PEERS; i++ ) {
+//       if( !selected_peers[i] ) break;
+//       fd_repair_send_request( ctx, stem, glob, type, slot, shred_index, selected_peers[i], now );
+//   }
+//   fd_rwlock_unwrite( &ctx->recorder->rw_lock );
+  
+// }
+
+static void
+fd_repair_send_requests_async( fd_repair_tile_ctx_t *   ctx,
+                         fd_stem_context_t *      stem,
+                         enum fd_needed_elem_type type,
+                         ulong                    slot ,
+                         uint                     shred_index,
+                         long                     now ){
+  fd_repair_t * glob = ctx->repair;
+
+  fd_pubkey_t * selected_peers[FD_REPAIR_NUM_NEEDED_PEERS];
+  fd_rwlock_write( &ctx->recorder->rw_lock );
+  fd_recorder_select_peers(ctx->recorder, FD_REPAIR_NUM_NEEDED_PEERS, selected_peers);
+
+  for( uint i=0; i<FD_REPAIR_NUM_NEEDED_PEERS; i++ ) {
+      if( !selected_peers[i] ) break;
+      fd_repair_send_request_async( ctx, stem, glob, type, slot, shred_index, selected_peers[i], now );
+  }
+  fd_rwlock_unwrite( &ctx->recorder->rw_lock );
+}
 
 
 static inline void
@@ -265,11 +534,7 @@ handle_new_cluster_contact_info( fd_repair_tile_ctx_t * ctx,
     fd_recorder_peer_t * peer = fd_recorder_peer_query( ctx->recorder, in_dests[i].pubkey );
     fd_rwlock_unread( &ctx->recorder->rw_lock );
 
-    if (peer) {
-      fd_repair_send_request(ctx, ctx->stem, ctx->repair, 0, 0, 0, in_dests[i].pubkey, fd_log_wallclock());
-      // FD_LOG_INFO(("Sent pong to peer: time: %lu", (ulong)fd_log_wallclock()));
-   
-    } else {
+    if (!peer) {
       fd_rwlock_write( &ctx->recorder->rw_lock );
       fd_recorder_peer_add(
           ctx->recorder, 
@@ -277,6 +542,7 @@ handle_new_cluster_contact_info( fd_repair_tile_ctx_t * ctx,
           (fd_ip4_port_t){ .addr = in_dests[i].ip4_addr, .port = repair_peer.port },
           fd_log_wallclock() 
       );
+      fd_repair_send_request_async(ctx, ctx->stem, ctx->repair, 0, 0, 0, in_dests[i].pubkey, fd_log_wallclock());
       fd_rwlock_unwrite( &ctx->recorder->rw_lock );
     }
 
@@ -314,7 +580,7 @@ fd_repair_handle_ping( fd_repair_tile_ctx_t *  repair_tile_ctx,
   fd_sha256_hash( pre_image, FD_PING_PRE_IMAGE_SZ, &pong->token );
 
   /* Sign it */
-  repair_signer( repair_tile_ctx, pong->signature.uc, pre_image, FD_PING_PRE_IMAGE_SZ, FD_KEYGUARD_SIGN_TYPE_SHA256_ED25519 );
+  repair_signer( repair_tile_ctx, pong->signature.uc, pre_image, FD_PING_PRE_IMAGE_SZ, FD_KEYGUARD_SIGN_TYPE_SHA256_ED25519, 0);
 
   fd_bincode_encode_ctx_t ctx;
   ctx.data = msg_buf;
@@ -322,6 +588,54 @@ fd_repair_handle_ping( fd_repair_tile_ctx_t *  repair_tile_ctx,
   FD_TEST(0 == fd_repair_protocol_encode(&protocol, &ctx));
   ulong buflen = (ulong)((uchar*)ctx.data - msg_buf);
   return buflen;
+}
+
+static void
+fd_repair_handle_ping_async( fd_repair_tile_ctx_t *        ctx,
+                            fd_stem_context_t *           stem FD_PARAM_UNUSED,
+                            fd_repair_t *                 glob,
+                            fd_gossip_ping_t const *      ping,
+                            fd_gossip_peer_addr_t const * peer_addr,
+                            uint                          dst_ip4_addr ) { 
+  if( FD_UNLIKELY( fd_repair_pending_sign_req_deque_full( ctx->pending_sign_req_deque ) ) ) {
+    // FD_LOG_WARNING(( "Pending sign request deque is full, dropping pong request" ));
+    return;
+  }
+  
+  fd_repair_pending_sign_req_t * pending = fd_repair_pending_sign_req_deque_push_tail_nocopy( ctx->pending_sign_req_deque );
+  
+  
+  fd_repair_protocol_new_disc(&pending->protocol, fd_repair_protocol_enum_pong);
+  fd_gossip_ping_t * pong = &pending->protocol.inner.pong;
+
+  pong->from = *glob->public_key;
+  ulong nonce = ctx->repair->next_nonce;
+
+  /* Generate response hash token */
+  uchar * pre_image = pending->buf;
+  memcpy( pre_image, "SOLANA_PING_PONG", 16UL );
+  memcpy( pre_image+16UL, ping->token.uc, 32UL);
+  fd_sha256_hash( pre_image, FD_PING_PRE_IMAGE_SZ, &pong->token );
+  
+  pending->seq = fd_keyguard_client_sign_async( ctx->keyguard_client, NULL, pre_image, FD_PING_PRE_IMAGE_SZ, FD_KEYGUARD_SIGN_TYPE_SHA256_ED25519, nonce );
+  
+  pending->timestamp       = fd_log_wallclock();
+  pending->sig_offset      = 0;
+  // FD_LOG_INFO(("ASYNC PONG peer addr: %u, nonce %lu", peer_addr->addr, nonce));
+  pending->dst_ip_addr     = peer_addr->addr;
+  pending->dst_port        = peer_addr->port;
+  pending->nonce           = nonce;
+  pending->msg_type        = FD_REPAIR_MSG_TYPE_PONG;
+  pending->is_intake       = 1;   /* Intake port for pong */
+  /* Fields not relevant for pong */
+  pending->slot            = 0;
+  pending->shred_index     = 0;
+  pending->type            = 0;
+  memset( &pending->recipient, 0, sizeof(fd_pubkey_t) );
+  pending->ip4.addr        = dst_ip4_addr;
+  pending->ip4.port        = 0;
+
+  ctx->repair->next_nonce++;
 }
 
 /* Pass a raw client response packet into the protocol. addr is the address of the sender */
@@ -352,10 +666,7 @@ fd_repair_recv_clnt_packet( fd_repair_tile_ctx_t *        repair_tile_ctx,
       switch( gmsg->discriminant ) {
       case fd_repair_response_enum_ping:
         {
-          uchar buf[1024];
-          ulong buflen = fd_repair_handle_ping( repair_tile_ctx, glob, &gmsg->inner.ping, src_addr, dst_ip4_addr, buf, sizeof(buf) );
-          ulong tsorig = fd_frag_meta_ts_comp( fd_tickcount() );
-          send_packet( repair_tile_ctx, stem, 1, src_addr->addr, src_addr->port, dst_ip4_addr, buf, buflen, tsorig );
+          fd_repair_handle_ping_async( repair_tile_ctx, stem, glob, &gmsg->inner.ping, src_addr, dst_ip4_addr );
           break;
         }
       }
@@ -364,128 +675,6 @@ fd_repair_recv_clnt_packet( fd_repair_tile_ctx_t *        repair_tile_ctx,
     }
   } FD_SCRATCH_SCOPE_END;
   return 0;
-}
-
-static ulong
-fd_repair_sign_and_send( fd_repair_tile_ctx_t *  repair_tile_ctx,
-                         fd_repair_protocol_t *  protocol,
-                         fd_gossip_peer_addr_t * addr FD_PARAM_UNUSED,
-                         uchar                 * buf,
-                         ulong                   buflen ) {
-
-  FD_TEST( buflen >= 1024UL );
-  fd_bincode_encode_ctx_t ctx = { .data = buf, .dataend = buf + buflen };
-  if( FD_UNLIKELY( fd_repair_protocol_encode( protocol, &ctx ) != FD_BINCODE_SUCCESS ) ) {
-    FD_LOG_CRIT(( "Failed to encode repair message (type %#x)", protocol->discriminant ));
-  }
-
-  buflen = (ulong)ctx.data - (ulong)buf;
-  if( FD_UNLIKELY( buflen<68 ) ) {
-    FD_LOG_CRIT(( "Attempted to sign unsigned repair message type (type %#x)", protocol->discriminant ));
-  }
-
-  /* At this point buffer contains
-
-     [ discriminant ] [ signature ] [ payload ]
-     ^                ^             ^
-     0                4             68 */
-
-  /* https://github.com/solana-labs/solana/blob/master/core/src/repair/serve_repair.rs#L1258 */
-
-  fd_memcpy( buf+64, buf, 4 );
-  buf    += 64UL;
-  buflen -= 64UL;
-
-  /* Now it contains
-
-     [ discriminant ] [ payload ]
-     ^                ^
-     buf              buf+4 */
-
-  fd_signature_t sig;
-  repair_signer( repair_tile_ctx, sig.uc, buf, buflen, FD_KEYGUARD_SIGN_TYPE_ED25519 );
-
-  /* Reintroduce the signature */
-
-  buf    -= 64UL;
-  buflen += 64UL;
-  fd_memcpy( buf + 4U, &sig, 64U );
-
-  return buflen;
-}
-
-
-static void
-fd_repair_send_request( fd_repair_tile_ctx_t   * repair_tile_ctx,
-                        fd_stem_context_t      * stem,
-                        fd_repair_t            * glob,
-                        enum fd_needed_elem_type type,
-                        ulong                    slot,
-                        uint                     shred_index,
-                        fd_pubkey_t const      * recipient,
-                        long                     now ) {
-
-  /* Send requests starting where we left off last time. i.e. if n < current_nonce, seek forward */
-  /* Track statistics */
-  fd_recorder_peer_t * peer = fd_recorder_peer_query( repair_tile_ctx->recorder, recipient );
-  if (!peer) return;
-
-  ulong nonce = glob->next_nonce;
-  
-  fd_repair_protocol_t protocol;
-  fd_repair_construct_request_protocol( glob, &protocol, type, slot, shred_index, recipient, glob->next_nonce, now );
-  glob->next_nonce++;
-  // fd_active_elem_t * active = fd_active_table_query( glob->actives, recipient, NULL );
-  // if (active->addr.addr != peer->ip4.addr){
-  //   __asm__("int $3");
-  // }
-  // active->avg_reqs++;
-  glob->metrics.send_pkt_cnt++;
-
-  uchar buf[1024];
-  ulong buflen       = fd_repair_sign_and_send( repair_tile_ctx, &protocol, &peer->ip4, buf, sizeof(buf) );
-  ulong tsorig       = fd_frag_meta_ts_comp( fd_tickcount() );
-  uint  src_ip4_addr = 0U; /* unknown */
-  send_packet( repair_tile_ctx, stem, 1, peer->ip4.addr, peer->ip4.port, src_ip4_addr, buf, buflen, tsorig );
-
-  if (slot!=0) {
-      // fd_rwlock_write( &repair_tile_ctx->recorder->rw_lock );
-      fd_recorder_req_insert(
-      repair_tile_ctx->recorder,
-                              nonce,
-                              (ulong)now,
-                              recipient,
-                              peer->ip4,
-                              slot,
-                              shred_index,
-                              type
-    );
-    // fd_rwlock_unwrite( &repair_tile_ctx->recorder->rw_lock );
-    // FD_LOG_INFO(("Insert req to peer: %s, nonce: %lu, slot: %lu, shred_idx: %u, type: %u", FD_BASE58_ENC_32_ALLOCA(recipient), nonce, slot, shred_index, type));
-  }
-}
-
-static void
-fd_repair_send_requests( fd_repair_tile_ctx_t *   ctx,
-                         fd_stem_context_t *      stem,
-                         enum fd_needed_elem_type type,
-                         ulong                    slot,
-                         uint                     shred_index,
-                         long                     now ){
-  fd_repair_t * glob = ctx->repair;
-
-fd_pubkey_t * selected_peers[FD_REPAIR_NUM_NEEDED_PEERS];
-  fd_rwlock_write( &ctx->recorder->rw_lock );
-  fd_recorder_select_peers(ctx->recorder, FD_REPAIR_NUM_NEEDED_PEERS, selected_peers);
-
-for( uint i=0; i<FD_REPAIR_NUM_NEEDED_PEERS; i++ ) {
-    if( !selected_peers[i] ) break;
-    fd_repair_send_request( ctx, stem, glob, type, slot, shred_index, selected_peers[i], now );
-      // FD_LOG_INFO(("Sent request to peer: time: %lu", (ulong)fd_log_wallclock()));
-}
-fd_rwlock_unwrite( &ctx->recorder->rw_lock );
-
-
 }
 
 
@@ -547,6 +736,13 @@ during_frag( fd_repair_tile_ctx_t * ctx,
     dcache_entry = fd_chunk_to_laddr_const( in_ctx->mem, chunk );
     dcache_entry_sz = sz;
 
+  } else if( FD_UNLIKELY( in_kind==IN_KIND_SIGN ) ) {
+    if( FD_UNLIKELY( chunk<in_ctx->chunk0 || chunk>in_ctx->wmark ) ) {
+      FD_LOG_ERR(( "chunk %lu %lu corrupt, not in range [%lu,%lu]", chunk, sz, in_ctx->chunk0, in_ctx->wmark ));
+    }
+    dcache_entry = fd_chunk_to_laddr_const( in_ctx->mem, chunk );
+    dcache_entry_sz = sz;
+
   } else {
     FD_LOG_ERR(( "Frag from unknown link (kind=%u in_idx=%lu)", in_kind, in_idx ));
   }
@@ -554,31 +750,76 @@ during_frag( fd_repair_tile_ctx_t * ctx,
   fd_memcpy( ctx->buffer, dcache_entry, dcache_entry_sz );
 }
 
-static ulong
-fd_repair_send_ping( fd_repair_tile_ctx_t        * repair_tile_ctx,
-                     fd_repair_t                 * glob,
-                     fd_pinged_elem_t            * val,
-                     uchar                       * buf,
-                     ulong                         buflen ) {
-  fd_repair_response_t gmsg;
-  fd_repair_response_new_disc( &gmsg, fd_repair_response_enum_ping );
-  fd_gossip_ping_t * ping = &gmsg.inner.ping;
+// static ulong
+// fd_repair_send_ping( fd_repair_tile_ctx_t        * repair_tile_ctx,
+//                      fd_repair_t                 * glob,
+//                      fd_pinged_elem_t            * val,
+//                      uchar                       * buf,
+//                      ulong                         buflen ) {
+//   fd_repair_response_t gmsg;
+//   fd_repair_response_new_disc( &gmsg, fd_repair_response_enum_ping );
+//   fd_gossip_ping_t * ping = &gmsg.inner.ping;
+//   ping->from = *glob->public_key;
+
+//   uchar pre_image[FD_PING_PRE_IMAGE_SZ];
+//   memcpy( pre_image, "SOLANA_PING_PONG", 16UL );
+//   memcpy( pre_image+16UL, val->token.uc, 32UL );
+
+//   fd_sha256_hash( pre_image, FD_PING_PRE_IMAGE_SZ, &ping->token );
+
+//   repair_signer( repair_tile_ctx, ping->signature.uc, pre_image, FD_PING_PRE_IMAGE_SZ, FD_KEYGUARD_SIGN_TYPE_SHA256_ED25519, 0);
+
+//   fd_bincode_encode_ctx_t ctx;
+//   FD_TEST( buflen >= 1024UL );
+//   ctx.data = buf;
+//   ctx.dataend = buf + buflen;
+//   FD_TEST(0 == fd_repair_response_encode(&gmsg, &ctx));
+//   return (ulong)((uchar*)ctx.data - buf);
+// }
+
+static void
+fd_repair_send_ping_async( fd_repair_tile_ctx_t        * ctx,
+                          fd_stem_context_t           * stem FD_PARAM_UNUSED,
+                          fd_repair_t                 * glob,
+                          fd_pinged_elem_t            * val,
+                          fd_repair_peer_addr_t const * peer_addr,
+                          uint                          self_ip4_addr ) {
+  if( FD_UNLIKELY( fd_repair_pending_sign_req_deque_full( ctx->pending_sign_req_deque ) ) ) {
+    // FD_LOG_WARNING(( "Pending sign request deque is full, dropping ping request" ));
+    return;
+  }
+  
+  fd_repair_pending_sign_req_t * pending = fd_repair_pending_sign_req_deque_push_tail_nocopy( ctx->pending_sign_req_deque );
+  
+  ulong nonce = ctx->repair->next_nonce;
+
+  fd_repair_response_new_disc(&pending->gmsg, fd_repair_response_enum_ping);
+  fd_gossip_ping_t * ping = &pending->gmsg.inner.ping;
   ping->from = *glob->public_key;
 
-  uchar pre_image[FD_PING_PRE_IMAGE_SZ];
+  uchar * pre_image = pending->buf;
   memcpy( pre_image, "SOLANA_PING_PONG", 16UL );
   memcpy( pre_image+16UL, val->token.uc, 32UL );
 
   fd_sha256_hash( pre_image, FD_PING_PRE_IMAGE_SZ, &ping->token );
 
-  repair_signer( repair_tile_ctx, ping->signature.uc, pre_image, FD_PING_PRE_IMAGE_SZ, FD_KEYGUARD_SIGN_TYPE_SHA256_ED25519 );
+  pending->seq = fd_keyguard_client_sign_async( ctx->keyguard_client, ping->signature.uc, pre_image, FD_PING_PRE_IMAGE_SZ, FD_KEYGUARD_SIGN_TYPE_SHA256_ED25519, nonce );
+  pending->timestamp       = fd_log_wallclock();
+  pending->sig_offset      = 0;
+  pending->dst_ip_addr     = peer_addr->addr;
+  pending->dst_port        = peer_addr->port;
+  pending->nonce           = nonce;
+  pending->msg_type        = FD_REPAIR_MSG_TYPE_PING;
+  pending->is_intake       = 0;   /* Serve port */
+  /* Fields not relevant for ping */
+  pending->slot            = 0;
+  pending->shred_index     = 0;
+  pending->type            = 0;
+  memset( &pending->recipient, 0, sizeof(fd_pubkey_t) );
+  pending->ip4.addr        = self_ip4_addr;
+  pending->ip4.port        = 0;
 
-  fd_bincode_encode_ctx_t ctx;
-  FD_TEST( buflen >= 1024UL );
-  ctx.data = buf;
-  ctx.dataend = buf + buflen;
-  FD_TEST(0 == fd_repair_response_encode(&gmsg, &ctx));
-  return (ulong)((uchar*)ctx.data - buf);
+  ctx->repair->next_nonce++;
 }
 
 static void
@@ -756,9 +997,7 @@ fd_repair_recv_serv_packet( fd_repair_tile_ctx_t *        repair_tile_ctx,
       }
       val->id = header->sender;
       val->good = 0;
-      uchar buf[1024];
-      ulong buflen = fd_repair_send_ping( repair_tile_ctx, glob, val, buf, sizeof(buf) );
-      send_packet( repair_tile_ctx, stem, 0, peer_addr->addr, peer_addr->port, self_ip4_addr, buf, buflen, fd_frag_meta_ts_comp( fd_tickcount() ) );
+      fd_repair_send_ping_async( repair_tile_ctx, stem, glob, val, peer_addr, self_ip4_addr );
     } else {
       uchar buf[FD_SHRED_MAX_SZ + sizeof(uint)];
       switch( protocol->discriminant ) {
@@ -809,7 +1048,7 @@ static void
 after_frag( fd_repair_tile_ctx_t * ctx,
             ulong                  in_idx,
             ulong                  seq    FD_PARAM_UNUSED,
-            ulong                  sig    FD_PARAM_UNUSED,
+            ulong                  sig,
             ulong                  sz,
             ulong                  tsorig FD_PARAM_UNUSED,
             ulong                  tspub  FD_PARAM_UNUSED,
@@ -820,6 +1059,8 @@ after_frag( fd_repair_tile_ctx_t * ctx,
   ctx->stem = stem;
 
   uint in_kind = ctx->in_kind[ in_idx ];
+  // FD_LOG_INFO(("after_frag: in_idx=%lu, in_kind=%u, sz=%lu, seq=%lu", in_idx, in_kind, sz, seq));
+  
   if( FD_UNLIKELY( in_kind==IN_KIND_CONTACT ) ) {
     handle_new_cluster_contact_info( ctx, ctx->buffer, sz );
     return;
@@ -827,6 +1068,89 @@ after_frag( fd_repair_tile_ctx_t * ctx,
 
   if( FD_UNLIKELY( in_kind==IN_KIND_STAKE ) ) {
     fd_repair_set_stake_weights_fini( ctx->repair );
+    return;
+  }
+
+  if( FD_UNLIKELY( in_kind==IN_KIND_SIGN ) ) {
+    // if( FD_UNLIKELY( sz < sizeof(ulong) + 64UL ) ) {
+    //   FD_LOG_WARNING(( "Invalid sign response size %lu", sz));
+    //   return;
+    // }
+    
+    ulong response_nonce = sig >> 32;
+    uchar const * signature = ctx->buffer;
+    fd_repair_pending_sign_req_t pending;
+    int found = 0;
+    
+    while( !fd_repair_pending_sign_req_deque_empty( ctx->pending_sign_req_deque ) ) {
+      fd_repair_pending_sign_req_t * head_req = fd_repair_pending_sign_req_deque_peek_head( ctx->pending_sign_req_deque );
+      
+      if( head_req->nonce > response_nonce ) {
+        break;
+      }
+      
+      pending = fd_repair_pending_sign_req_deque_pop_head( ctx->pending_sign_req_deque );
+      
+      if( pending.nonce == response_nonce ) {
+        // FD_LOG_INFO(("Found matching request for nonce %lu (seq %lu)", response_nonce, pending.seq));
+        found = 1;
+        break;
+      }
+    }
+    
+    if( FD_UNLIKELY( !found ) ) {
+      // FD_LOG_WARNING(( "Received sign response for unknown nonce %lu", response_nonce ));
+      return;
+    }
+    // FD_LOG_INFO(( "ASYNC: sign request seq: %lu, nonce: %lu", pending.seq, pending.nonce ));
+
+    /* Copy signature to the correct position */
+    fd_memcpy( pending.buf + pending.sig_offset, signature, 64UL );
+    ulong tsorig = fd_frag_meta_ts_comp( fd_tickcount() );
+
+    switch( pending.msg_type ) {
+      case FD_REPAIR_MSG_TYPE_REPAIR_REQUEST: {
+        // FD_LOG_INFO(("ASYNC REQ END PUBKEY: %u", pending.ip4.addr));
+        // FD_LOG_HEXDUMP_INFO(("ASYNC REQ END: ", pending.buf, pending.buflen));
+        uint src_ip4_addr = 0U; /* unknown */
+        send_packet( ctx, stem, pending.is_intake, pending.dst_ip_addr, pending.dst_port, src_ip4_addr, pending.buf, pending.buflen, tsorig );
+        break;
+      }
+      case FD_REPAIR_MSG_TYPE_PING: {
+        // Update the signature in the gmsg structure
+        fd_memcpy( pending.gmsg.inner.ping.signature.uc, signature, 64UL );
+        
+        // Now encode the complete message with the signature
+        fd_bincode_encode_ctx_t ping_ctx;
+        ping_ctx.data = pending.buf;
+        ping_ctx.dataend = pending.buf + sizeof(pending.buf);
+        FD_TEST(0 == fd_repair_response_encode(&pending.gmsg, &ping_ctx));
+        pending.buflen = (ulong)((uchar*)ping_ctx.data - pending.buf);
+
+        // FD_LOG_INFO(("ASYNC PING END PUBKEY: %u, nonce %lu", pending.ip4.addr, pending.nonce));
+        // FD_LOG_HEXDUMP_INFO(("ASYNC PING END: ", pending.buf, pending.buflen));
+        send_packet( ctx, stem, pending.is_intake, pending.dst_ip_addr, pending.dst_port, pending.ip4.addr, pending.buf, pending.buflen, tsorig );
+        break;
+      }
+      case FD_REPAIR_MSG_TYPE_PONG: {
+        // Update the signature in the protocol structure
+        fd_memcpy( pending.protocol.inner.pong.signature.uc, signature, 64UL );
+        
+        // Now encode the complete protocol with the signature
+        fd_bincode_encode_ctx_t pong_ctx;
+        pong_ctx.data = pending.buf;
+        pong_ctx.dataend = pending.buf + sizeof(pending.buf);
+        FD_TEST(0 == fd_repair_protocol_encode(&pending.protocol, &pong_ctx));
+        pending.buflen = (ulong)((uchar*)pong_ctx.data - pending.buf);
+
+        // FD_LOG_INFO(("ASYNC PONG END PUBKEY: %u", pending.ip4.addr));
+        // FD_LOG_HEXDUMP_INFO(("ASYNC PONG END: ", pending.buf, pending.buflen));
+        send_packet( ctx, stem, pending.is_intake, pending.dst_ip_addr, pending.dst_port, pending.ip4.addr, pending.buf, pending.buflen, tsorig );
+        break;
+      }
+      default:
+        FD_LOG_ERR(("Unknown message type %u", pending.msg_type));
+    }
     return;
   }
 
@@ -838,7 +1162,7 @@ after_frag( fd_repair_tile_ctx_t * ctx,
        slot has been loaded. */    
     fd_shred_t * shred = (fd_shred_t *)fd_type_pun( ctx->buffer );
     if (sz == 88 || sz == 89) {
-      FD_LOG_INFO(("Recieved shred %lu %u %u, time: %ld", shred->slot, shred->idx, shred->fec_set_idx, fd_log_wallclock()));
+      // FD_LOG_INFO(("Recieved shred %lu %u %u, time: %ld", shred->slot, shred->idx, shred->fec_set_idx, fd_log_wallclock()));
     }
     ulong wmark = fd_fseq_query( ctx->wmark );
     if( FD_UNLIKELY( fd_forest_root_slot( ctx->forest ) == ULONG_MAX ) ) {
@@ -902,26 +1226,7 @@ after_frag( fd_repair_tile_ctx_t * ctx,
       FD_TEST( !fd_fec_chainer_query( ctx->fec_chainer, shred->slot, shred->fec_set_idx ) );
       FD_TEST( fd_fec_chainer_insert( ctx->fec_chainer, shred->slot, shred->fec_set_idx, (ushort)(shred->idx - shred->fec_set_idx + 1), data_complete, slot_complete, shred->data.parent_off, merkle, merkle /* FIXME */ ) );
 
-      while( FD_LIKELY( !fd_fec_out_empty( ctx->fec_chainer->out ) ) ) {
-        fd_fec_out_t out = fd_fec_out_pop_head( ctx->fec_chainer->out );
-        if( FD_UNLIKELY( out.err != FD_FEC_CHAINER_SUCCESS ) ) FD_LOG_ERR(( "fec chainer err %d", out.err ));
-        fd_reasm_t * reasm = fd_reasm_query( ctx->reasm, out.slot, NULL );
-        if( FD_UNLIKELY( !reasm ) ) {
-          reasm      = fd_reasm_insert( ctx->reasm, out.slot );
-          reasm->cnt = 0;
-        }
-        if( FD_UNLIKELY( out.data_complete ) ) {
-          uint  cnt   = out.fec_set_idx + out.data_cnt - reasm->cnt;
-          ulong sig   = fd_disco_repair_replay_sig( out.slot, out.parent_off, cnt, out.slot_complete );
-          ulong tspub = fd_frag_meta_ts_comp( fd_tickcount() );
-          reasm->cnt = out.fec_set_idx + out.data_cnt;
-          fd_stem_publish( ctx->stem, REPLAY_OUT_IDX, sig, 0, 0, 0, tsorig, tspub );
-          if( FD_UNLIKELY( out.slot_complete ) ) {
-            fd_reasm_remove( ctx->reasm, reasm );
-            // FD_LOG_INFO(( "SLOT COMPLETE: %lu, time: %ld", out.slot, fd_log_wallclock() ));
-          }
-        }
-      }
+
     }
 
     /* Insert the shred into the map. */
@@ -1004,12 +1309,6 @@ after_credit( fd_repair_tile_ctx_t * ctx,
      doing any work. */
   *charge_busy = 1;
 
-  if (ctx->idx == 100) {
-    ctx->idx = 0;
-    return;
-  } else {
-    ctx->idx++;
-  }
 
   fd_rwlock_write( &ctx->recorder->rw_lock );
   fd_recorder_req_expire(ctx->recorder, (ulong)fd_log_wallclock(), 0);
@@ -1019,6 +1318,30 @@ after_credit( fd_repair_tile_ctx_t * ctx,
   if( FD_UNLIKELY( ctx->recorder->peer_cnt == 0 ) ) return; /* no peers to send requests to */
 
   long now = fd_log_wallclock();
+
+  if ( FD_LIKELY( !fd_fec_out_empty( ctx->fec_chainer->out ) ) ) {
+    fd_fec_out_t out = fd_fec_out_pop_head( ctx->fec_chainer->out );
+    if( FD_UNLIKELY( out.err != FD_FEC_CHAINER_SUCCESS ) ) FD_LOG_ERR(( "fec chainer err %d", out.err ));
+    fd_reasm_t * reasm = fd_reasm_query( ctx->reasm, out.slot, NULL );
+    if( FD_UNLIKELY( !reasm ) ) {
+      reasm      = fd_reasm_insert( ctx->reasm, out.slot );
+      reasm->cnt = 0;
+    }
+    if( FD_UNLIKELY( out.data_complete ) ) {
+      uint  cnt   = out.fec_set_idx + out.data_cnt - reasm->cnt;
+      ulong sig   = fd_disco_repair_replay_sig( out.slot, out.parent_off, cnt, out.slot_complete );
+      ulong tspub = fd_frag_meta_ts_comp( fd_tickcount() );
+      reasm->cnt = out.fec_set_idx + out.data_cnt;
+      fd_stem_publish( ctx->stem, REPLAY_OUT_IDX, sig, 0, 0, 0, 0, tspub );
+      if( FD_UNLIKELY( out.slot_complete ) ) {
+        fd_reasm_remove( ctx->reasm, reasm );
+        // FD_LOG_INFO(( "SLOT COMPLETE: %lu, time: %ld", out.slot, fd_log_wallclock() ));
+      }
+    }
+    *opt_poll_in = 1;
+    *charge_busy = 1;
+    return;
+  }
 
 #if MAX_REQ_PER_CREDIT > FD_REPAIR_NUM_NEEDED_PEERS
   /* If the requests are > 1 per credit then we need to starve
@@ -1037,15 +1360,17 @@ after_credit( fd_repair_tile_ctx_t * ctx,
   fd_forest_orphaned_t * orphaned = fd_forest_orphaned( forest );
 
   // Always request orphans
-
+  // FD_LOG_INFO(("AFTER CREDIT START"));
   int total_req = 0;
   for( fd_forest_orphaned_iter_t iter = fd_forest_orphaned_iter_init( orphaned, pool );
         !fd_forest_orphaned_iter_done( iter, orphaned, pool );
         iter = fd_forest_orphaned_iter_next( iter, orphaned, pool ) ) {
     fd_forest_ele_t * orphan = fd_forest_orphaned_iter_ele( iter, orphaned, pool );
     if( fd_repair_need_orphan( ctx->repair, orphan->slot ) ) {
-      fd_repair_send_requests( ctx, stem, fd_needed_orphan, orphan->slot, UINT_MAX, now );
+      // fd_repair_send_requests( ctx, stem, fd_needed_orphan, orphan->slot, UINT_MAX, now );
+      fd_repair_send_requests_async( ctx, stem, fd_needed_orphan, orphan->slot, UINT_MAX, now );
       total_req += FD_REPAIR_NUM_NEEDED_PEERS;
+      return;
     }
   }
 
@@ -1079,10 +1404,12 @@ after_credit( fd_repair_tile_ctx_t * ctx,
     ele = fd_forest_pool_ele_const( pool, ctx->repair_iter.ele_idx );
     // Request first, advance iterator second.
     if( ctx->repair_iter.shred_idx == UINT_MAX && fd_repair_need_highest_window_index( ctx->repair, ele->slot, 0 ) ){
-      fd_repair_send_requests( ctx, stem, fd_needed_highest_window_index, ele->slot, 0, now );
+      // fd_repair_send_requests( ctx, stem, fd_needed_highest_window_index, ele->slot, 0, now );
+      fd_repair_send_requests_async( ctx, stem, fd_needed_highest_window_index, ele->slot, 0, now );
       total_req += FD_REPAIR_NUM_NEEDED_PEERS;
     } else if( fd_repair_need_window_index( ctx->repair, ele->slot, ctx->repair_iter.shred_idx ) ) {
-      fd_repair_send_requests( ctx, stem, fd_needed_window_index, ele->slot, ctx->repair_iter.shred_idx, now );
+      // fd_repair_send_requests( ctx, stem, fd_needed_window_index, ele->slot, ctx->repair_iter.shred_idx, now );
+      fd_repair_send_requests_async( ctx, stem, fd_needed_window_index, ele->slot, ctx->repair_iter.shred_idx, now );
       total_req += FD_REPAIR_NUM_NEEDED_PEERS;
     }
 
@@ -1234,6 +1561,7 @@ unprivileged_init( fd_topo_t *      topo,
   /* Look at fec_repair.h for an explanation of this fec_max. */
 
   ctx->fec_chainer = FD_SCRATCH_ALLOC_APPEND( l, fd_fec_chainer_align(), fd_fec_chainer_footprint( 1 << 20 ) );
+  ctx->pending_sign_req_deque = FD_SCRATCH_ALLOC_APPEND( l, fd_repair_pending_sign_req_deque_align(), fd_repair_pending_sign_req_deque_footprint() );
 
   void * smem = FD_SCRATCH_ALLOC_APPEND( l, fd_scratch_smem_align(), fd_scratch_smem_footprint( FD_REPAIR_SCRATCH_MAX ) );
   void * fmem = FD_SCRATCH_ALLOC_APPEND( l, fd_scratch_fmem_align(), fd_scratch_fmem_footprint( FD_REPAIR_SCRATCH_DEPTH ) );
@@ -1295,6 +1623,7 @@ unprivileged_init( fd_topo_t *      topo,
   ctx->fec_sigs = fd_fec_sig_join( fd_fec_sig_new( ctx->fec_sigs, 20 ) );
   ctx->reasm = fd_reasm_join( fd_reasm_new( ctx->reasm, 20 ) );
   ctx->fec_chainer = fd_fec_chainer_join( fd_fec_chainer_new( ctx->fec_chainer, 1 << 20, 0 ) );
+  ctx->pending_sign_req_deque = fd_repair_pending_sign_req_deque_join( fd_repair_pending_sign_req_deque_new( ctx->pending_sign_req_deque ) );
   ctx->repair_iter = fd_forest_iter_init( ctx->forest );
   FD_TEST( fd_forest_iter_done( ctx->repair_iter, ctx->forest ) );
 

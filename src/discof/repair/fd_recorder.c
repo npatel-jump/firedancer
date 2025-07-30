@@ -561,13 +561,13 @@ fd_recorder_reshuffle_peers( fd_recorder_t * recorder ) {
   fd_recorder_peer_map_t * peer_map = fd_recorder_peer_map( recorder );
   fd_recorder_peer_t * peer_pool = fd_recorder_peer_pool( recorder );
 
-  int val = 0;
+  // int val = 0;
   for( fd_recorder_peer_map_iter_t iter = fd_recorder_peer_map_iter_init( peer_map, peer_pool );
   !fd_recorder_peer_map_iter_done( iter, peer_map, peer_pool );
   iter = fd_recorder_peer_map_iter_next( iter, peer_map, peer_pool ) ) {
-    val++;
+    // val++;
   }
-  FD_LOG_INFO(("val: %d", val));
+  // FD_LOG_INFO(("val: %d", val));
   
   /* Iterate through all peers in the map and categorize them */
   for( fd_recorder_peer_map_iter_t iter = fd_recorder_peer_map_iter_init( peer_map, peer_pool );
@@ -592,9 +592,9 @@ fd_recorder_reshuffle_peers( fd_recorder_t * recorder ) {
       
     }
   
-    FD_LOG_INFO(( "Reshuffled peers - High: %lu, Medium: %lu, Low: %lu, Zero HR: %lu",
-                  recorder->high_priority_cnt, recorder->medium_priority_cnt,
-                  recorder->low_priority_cnt, recorder->zero_hr_cnt ));
+    // FD_LOG_INFO(( "Reshuffled peers - High: %lu, Medium: %lu, Low: %lu, Zero HR: %lu",
+    //               recorder->high_priority_cnt, recorder->medium_priority_cnt,
+    //               recorder->low_priority_cnt, recorder->zero_hr_cnt ));
 }
 
 void
@@ -606,8 +606,8 @@ fd_recorder_select_peers(fd_recorder_t * recorder, uint num_peers, fd_pubkey_t *
   
   /* Note: Caller must hold at least read lock on recorder->rw_lock */
   
-  /* Check if we need to reshuffle (every 10 cycles) */
-  if( FD_UNLIKELY( recorder->cycle_position == 0 && (recorder->cycle_count % 10) == 0 ) ) {
+  /* Check if we need to reshuffle (every 50 cycles) */
+  if( FD_UNLIKELY( recorder->cycle_position == 0 && (recorder->cycle_count % 50) == 0 ) ) {
     fd_recorder_reshuffle_peers( recorder );
   }
   
