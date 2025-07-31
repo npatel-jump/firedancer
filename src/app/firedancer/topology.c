@@ -143,7 +143,6 @@ resolve_address( char const * address,
     FD_LOG_WARNING(( "cannot resolve address \"%s\": %i-%s", address, err, gai_strerror( err ) ));
     return 0;
   }
-
   int resolved = 0;
   for( struct addrinfo * cur=res; cur; cur=cur->ai_next ) {
     if( FD_UNLIKELY( cur->ai_addr->sa_family!=AF_INET ) ) continue;
@@ -155,6 +154,18 @@ resolve_address( char const * address,
 
   freeaddrinfo( res );
   return resolved;
+}
+
+fd_topo_obj_t *
+setup_topo_recorder( fd_topo_t *  topo,
+                          char const * wksp_name,
+                          ulong        timeout_ns ) {
+  fd_topo_obj_t * obj = fd_topob_obj( topo, "recorder", wksp_name );
+  ulong seed;
+  FD_TEST( sizeof(ulong) == getrandom( &seed, sizeof(ulong), 0 ) );
+  FD_TEST( fd_pod_insertf_ulong( topo->props, seed,       "obj.%lu.seed",       obj->id ) );
+  FD_TEST( fd_pod_insertf_ulong( topo->props, timeout_ns, "obj.%lu.timeout_ns", obj->id ) );
+  return obj;
 }
 
 static int
@@ -222,6 +233,7 @@ fd_topo_initialize( config_t * config ) {
 
   ulong net_tile_cnt    = config->layout.net_tile_count;
   ulong shred_tile_cnt  = config->layout.shred_tile_count;
+  // ulong sign_tile_cnt   = config->firedancer.layout.sign_tile_count;
   ulong quic_tile_cnt   = config->layout.quic_tile_count;
   ulong verify_tile_cnt = config->layout.verify_tile_count;
   ulong bank_tile_cnt   = config->layout.bank_tile_count;
@@ -322,6 +334,7 @@ fd_topo_initialize( config_t * config ) {
   fd_topob_wksp( topo, "replay_manif" );
 
   fd_topob_wksp( topo, "slot_fseqs"  ); /* fseqs for marked slots eg. turbine slot */
+  fd_topob_wksp( topo, "recorder" );
   if( enable_rpc ) fd_topob_wksp( topo, "rpcsrv" );
 
   #define FOR(cnt) for( ulong i=0UL; i<cnt; i++ )
@@ -376,11 +389,11 @@ fd_topo_initialize( config_t * config ) {
   /**/                 fd_topob_link( topo, "send_net",     "net_send",     config->net.ingress_buffer_size,          FD_NET_MTU,                    2UL );
 
   /**/                 fd_topob_link( topo, "repair_net",   "net_repair",   config->net.ingress_buffer_size,          FD_NET_MTU,                    1UL );
-  /**/                 fd_topob_link( topo, "repair_sign",  "repair_sign",  128UL,                                    2048UL,                        1UL );
+  /**/                 fd_topob_link( topo, "repair_sign",  "repair_sign",  4096UL,                                    2048UL,                        1UL );
   FOR(shred_tile_cnt)  fd_topob_link( topo, "shred_repair", "shred_repair", pending_fec_shreds_depth,                 FD_SHRED_REPAIR_MTU,           2UL /* at most 2 msgs per after_frag */ );
 
   FOR(shred_tile_cnt)  fd_topob_link( topo, "repair_shred", "shred_repair", pending_fec_shreds_depth,                 sizeof(fd_ed25519_sig_t),      1UL );
-  /**/                 fd_topob_link( topo, "sign_repair",  "sign_repair",  128UL,                                    64UL,                          1UL );
+  /**/                 fd_topob_link( topo, "sign_repair",  "sign_repair",  4096UL,                                    64UL,                          1UL );
   /**/                 fd_topob_link( topo, "repair_repla", "repair_repla", 65536UL,                                  FD_DISCO_REPAIR_REPLAY_MTU,    1UL );
   FOR(bank_tile_cnt)   fd_topob_link( topo, "replay_poh",   "replay_poh",   128UL,                                    (4096UL*sizeof(fd_txn_p_t))+sizeof(fd_microblock_trailer_t), 1UL  );
   /**/                 fd_topob_link( topo, "poh_shred",    "poh_shred",    16384UL,                                  USHORT_MAX,                    1UL   );
@@ -534,11 +547,19 @@ fd_topo_initialize( config_t * config ) {
   FD_TEST( fd_pod_insertf_ulong( topo->props, runtime_pub_obj->id, "runtime_pub" ) );
 
   /* Setup a shared wksp object for store. */
-
   fd_topo_obj_t * store_obj = setup_topo_store( topo, "store", config->firedancer.store.max_completed_shred_sets );
   FOR(shred_tile_cnt) fd_topob_tile_uses( topo, &topo->tiles[ fd_topo_find_tile( topo, "shred", i ) ], store_obj, FD_SHMEM_JOIN_MODE_READ_WRITE );
   fd_topob_tile_uses( topo, replay_tile, store_obj, FD_SHMEM_JOIN_MODE_READ_WRITE );
   FD_TEST( fd_pod_insertf_ulong( topo->props, store_obj->id, "store" ) );
+
+  /* Setup a shared wksp object for recorder. */
+  fd_topo_obj_t * recorder_obj = setup_topo_recorder( topo, "recorder",   config->firedancer.recorder.timeout_ns /* 1 second timeout */);
+  fd_topob_tile_uses( topo, repair_tile, recorder_obj, FD_SHMEM_JOIN_MODE_READ_WRITE );
+  if( config->tiles.shredcap.enabled ) {
+    fd_topo_tile_t * shredcap_tile = &topo->tiles[ fd_topo_find_tile( topo, "shrdcp", 0UL ) ];
+    fd_topob_tile_uses( topo, shredcap_tile, recorder_obj, FD_SHMEM_JOIN_MODE_READ_WRITE );
+  }
+  FD_TEST( fd_pod_insertf_ulong( topo->props, recorder_obj->id, "recorder" ) );
 
   /* Create a txncache to be used by replay. */
   fd_topo_obj_t * txncache_obj = setup_topo_txncache( topo, "tcache",
@@ -749,7 +770,7 @@ fd_topo_initialize( config_t * config ) {
 
   /**/                 fd_topob_tile_in(  topo, "sign",   0UL,         "metric_in",  "repair_sign",  0UL,    FD_TOPOB_UNRELIABLE, FD_TOPOB_POLLED   );
   /**/                 fd_topob_tile_out( topo, "repair", 0UL,                       "repair_sign",  0UL                                            );
-  /**/                 fd_topob_tile_in(  topo, "repair", 0UL,         "metric_in",  "sign_repair",  0UL,    FD_TOPOB_UNRELIABLE, FD_TOPOB_UNPOLLED );
+  /**/                 fd_topob_tile_in(  topo, "repair", 0UL,         "metric_in",  "sign_repair",  0UL,    FD_TOPOB_UNRELIABLE, FD_TOPOB_POLLED   );
   /**/                 fd_topob_tile_out( topo, "repair", 0UL,                       "repair_repla", 0UL                                            );
   FOR(shred_tile_cnt)  fd_topob_tile_out( topo, "repair", 0UL,                       "repair_shred", i                                              );
   /**/                 fd_topob_tile_out( topo, "sign",   0UL,                       "sign_repair",  0UL                                            );

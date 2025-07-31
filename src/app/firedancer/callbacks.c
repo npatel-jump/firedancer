@@ -7,6 +7,8 @@
 #include "../../flamenco/runtime/fd_runtime.h"
 #include "../../flamenco/runtime/fd_runtime_public.h"
 
+#include "../../discof/repair/fd_recorder.h"
+
 #define VAL(name) (__extension__({                                                             \
   ulong __x = fd_pod_queryf_ulong( topo->props, ULONG_MAX, "obj.%lu.%s", obj->id, name );      \
   if( FD_UNLIKELY( __x==ULONG_MAX ) ) FD_LOG_ERR(( "obj.%lu.%s was not set", obj->id, name )); \
@@ -251,6 +253,32 @@ fd_topo_obj_callbacks_t fd_obj_cb_exec_spad = {
   .footprint = exec_spad_footprint,
   .align     = exec_spad_align,
   .new       = exec_spad_new,
+};
+
+static ulong
+recorder_footprint( fd_topo_t const *     topo,
+                         fd_topo_obj_t const * obj ) {
+  (void)topo; (void)obj;
+  return fd_recorder_footprint();
+}
+
+static ulong
+recorder_align( fd_topo_t const *     topo FD_FN_UNUSED,
+                     fd_topo_obj_t const * obj  FD_FN_UNUSED ) {
+  return fd_recorder_align();
+}
+
+static void
+recorder_new( fd_topo_t const *     topo,
+                   fd_topo_obj_t const * obj ) {
+  FD_TEST( fd_recorder_new( fd_topo_obj_laddr( topo, obj->id ), VAL("seed"), VAL("timeout_ns") ) );
+}
+
+fd_topo_obj_callbacks_t fd_obj_cb_recorder = {
+  .name      = "recorder",
+  .footprint = recorder_footprint,
+  .align     = recorder_align,
+  .new       = recorder_new,
 };
 
 #undef VAL

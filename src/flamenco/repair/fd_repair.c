@@ -366,7 +366,7 @@ fd_repair_create_inflight_request( fd_repair_t * glob, int type, ulong slot, uin
     dupelem->last_send_time = 0L;
   }
 
-  if( FD_LIKELY( dupelem->last_send_time+(long)40e6  < now ) ) { /* 40ms */
+  if( FD_LIKELY( dupelem->last_send_time+(long)10e6  < now ) ) { /* 40ms */
     dupelem->last_send_time = now;
     dupelem->req_cnt        = FD_REPAIR_NUM_NEEDED_PEERS;
     return 1;
@@ -524,4 +524,36 @@ fd_repair_set_stake_weights_fini( fd_repair_t * repair ) {
 fd_repair_metrics_t *
 fd_repair_get_metrics( fd_repair_t * repair ) {
   return &repair->metrics;
+}
+
+void
+fd_repair_parse_shred_header( fd_repair_t * repair, uchar * buffer, fd_recorder_t * recorder, ulong * sz) {
+  uint nonce = 0;
+  uint src_ip4_addr = 0;
+  if (*sz == FD_SHRED_DATA_HEADER_SZ + FD_IP4_ADDR_SZ + FD_NONCE_SZ) {
+    nonce = fd_uint_load_4(buffer + FD_SHRED_DATA_HEADER_SZ + FD_IP4_ADDR_SZ);
+    src_ip4_addr = fd_uint_load_4(buffer + FD_SHRED_DATA_HEADER_SZ);
+    *sz -= FD_NONCE_SZ + FD_IP4_ADDR_SZ;
+  }
+  if (nonce != 0) {
+    repair->counter++;
+    // fd_reporter_print_first_nonce(reporter);
+  }
+    fd_recorder_req_t * req = fd_recorder_req_query(recorder, nonce);
+    if (!req && nonce != 0) {
+      // FD_LOG_INFO(("Request not found for nonce: %u", nonce));
+    }
+    if (req) {
+      fd_recorder_peer_t * peer = fd_recorder_peer_query(recorder, &req->pubkey);
+
+      if (peer) {
+        (void )src_ip4_addr;
+        // FD_LOG_INFO(("Received request from %s", FD_BASE58_ENC_32_ALLOCA(&req->pubkey)));
+        // fd_recorder_peer_update(recorder, &peer->key, (fd_ip4_port_t){ .addr = src_ip4_addr, .port = 0 }, 1, req->timestamp_ns,  (ulong)fd_log_wallclock());
+      }
+      fd_recorder_req_remove(recorder, nonce, 1);
+      fd_shred_t * shred = (fd_shred_t *)fd_type_pun( buffer );
+      FD_LOG_INFO(("Counter: %lu, nonce: %u, Response for slot: %lu, shred_idx: %u", repair->counter, nonce, shred->slot, shred->idx));
+      // fd_reporter_print(reporter);
+    }
 }

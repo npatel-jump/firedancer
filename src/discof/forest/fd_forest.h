@@ -326,6 +326,18 @@ struct fd_forest_iter {
 };
 typedef struct fd_forest_iter fd_forest_iter_t;
 
+/* fd_forest_fast_iter_t is a forest iterator that doesn't track a "head" value
+   and therefore is more resilient to forest modifications. Unlike the regular
+   forest iterator, this iterator doesn't get invalidated when the forest
+   structure changes. Instead, it continues iterating from its current position. */
+
+struct fd_forest_fast_iter {
+  ulong ele_idx;    /* Current element index in the pool */
+  uint  shred_idx;  /* Current shred index within the element */
+  /* No head or version tracking - this iterator is resilient to forest changes */
+};
+typedef struct fd_forest_fast_iter fd_forest_fast_iter_t;
+
 /* fd_forest_iter_* supports iteration over a frontier node of the
    forest and its children. iter_init selects the frontier_iter_init
    node from the frontier. iter_next advances the iterator to the next
@@ -359,6 +371,25 @@ fd_forest_iter_next( fd_forest_iter_t iter, fd_forest_t const * forest );
 
 int
 fd_forest_iter_done( fd_forest_iter_t iter, fd_forest_t const * forest );
+
+/* fd_forest_fast_iter_* provides a resilient iteration mechanism that doesn't
+   get invalidated by forest modifications. Unlike the regular iterator, this
+   iterator continues from its current position even when the forest structure
+   changes. The iterator only needs to be reset when explicitly requested
+   (e.g., when req_expire > 0).
+   
+   The iterator traverses the frontier nodes depth-first, always choosing the
+   leftmost child. When it reaches a leaf or completes a node, it attempts to
+   continue with the next available frontier node. */
+
+fd_forest_fast_iter_t
+fd_forest_fast_iter_init( fd_forest_t * forest );
+
+fd_forest_fast_iter_t
+fd_forest_fast_iter_next( fd_forest_fast_iter_t iter, fd_forest_t const * forest );
+
+int
+fd_forest_fast_iter_done( fd_forest_fast_iter_t iter, fd_forest_t const * forest );
 
 /* Misc */
 

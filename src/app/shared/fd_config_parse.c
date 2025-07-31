@@ -78,6 +78,7 @@ fd_config_extract_podf( uchar *        pod,
                         fd_configf_t * config ) {
   CFG_POP      ( uint,   layout.exec_tile_count                           );
   CFG_POP      ( uint,   layout.writer_tile_count                         );
+  CFG_POP      ( uint,   layout.sign_tile_count                           );
 
   CFG_POP      ( ulong,  blockstore.shred_max                             );
   CFG_POP      ( ulong,  blockstore.block_max                             );
@@ -110,6 +111,8 @@ fd_config_extract_podf( uchar *        pod,
   CFG_POP      ( uint,   snapshots.minimum_download_speed_mib             );
   CFG_POP      ( uint,   snapshots.maximum_download_retry_abort           );
   CFG_POP      ( cstr,   snapshots.cluster                                );
+
+  CFG_POP      ( ulong,  recorder.timeout_ns                               );
 
   return config;
 }

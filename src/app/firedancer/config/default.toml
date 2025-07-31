@@ -391,6 +391,14 @@ user = ""
     # WARNING: disabling this option can cause performance degradation, as
     # the database pages may be paged out.
     lock_pages = true
+    
+# This section configures the repair ledger which tracks outstanding
+# repair requests and peer information for the repair protocol.
+[recorder]
+    # The timeout in nanoseconds for outstanding repair requests.
+    # When a repair request exceeds this timeout, it is considered
+    # expired and will be removed from tracking.  Default is 1 second.
+    timeout_ns = 1_000_000_000
 
 [runtime]
     # Specifies the size in gigibytes of the runtime heap allocator.
@@ -685,6 +693,9 @@ user = ""
     # development and benchmarking, 1 tile is also sufficient to hit
     # very high TPS rates because the cluster size will be very small.
     shred_tile_count = 1
+
+    # TODO DOC Sign Tile count
+    sign_tile_count = 1
 
 # All memory that will be used in Firedancer is pre-allocated in two
 # kinds of pages: huge and gigantic.  Huge pages are 2 MiB and gigantic

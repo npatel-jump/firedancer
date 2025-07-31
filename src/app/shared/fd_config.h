@@ -112,6 +112,7 @@ struct fd_configf {
   struct {
     uint exec_tile_count; /* TODO: redundant ish with bank tile cnt */
     uint writer_tile_count;
+    uint sign_tile_count;
   } layout;
 
   struct {
@@ -142,6 +143,10 @@ struct fd_configf {
   struct {
     ulong max_completed_shred_sets;
   } store;
+
+  struct {
+    ulong timeout_ns;
+  } recorder;
 };
 
 typedef struct fd_configf fd_configf_t;

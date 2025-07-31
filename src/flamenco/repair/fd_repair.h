@@ -4,7 +4,7 @@
 #include "../gossip/fd_gossip.h"
 #include "../../ballet/shred/fd_shred.h"
 #include "../../disco/metrics/generated/fd_metrics_repair.h"
-
+#include "../../discof/repair/fd_recorder.h"
 
 #define FD_REPAIR_DELIVER_FAIL_TIMEOUT -1
 #define FD_REPAIR_DELIVER_FAIL_REQ_LIMIT_EXCEEDED -2
@@ -32,7 +32,7 @@
 /* Sha256 pre-image size for pings */
 #define FD_PING_PRE_IMAGE_SZ (48UL)
 /* Number of peers to send requests to. */
-#define FD_REPAIR_NUM_NEEDED_PEERS (2)
+#define FD_REPAIR_NUM_NEEDED_PEERS (1)
 
 typedef fd_gossip_peer_addr_t fd_repair_peer_addr_t;
 
@@ -237,6 +237,8 @@ struct fd_repair {
     int good_peer_cache_file_fd;
     /* Metrics */
     fd_repair_metrics_t metrics;
+
+    ulong counter;
 };
 typedef struct fd_repair fd_repair_t;
 
@@ -326,6 +328,8 @@ void fd_repair_set_stake_weights_fini( fd_repair_t * repair );
 
 fd_repair_metrics_t *
 fd_repair_get_metrics( fd_repair_t * repair );
+
+void fd_repair_parse_shred_header( fd_repair_t * repair, uchar * buffer, fd_recorder_t * recorder, ulong * sz);
 
 
 #endif /* HEADER_fd_src_flamenco_repair_fd_repair_h */
