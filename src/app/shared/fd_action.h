@@ -72,6 +72,12 @@ union fdctl_args {
   } repair;
 
   struct {
+    char manifest_path[ 256UL ];
+    ulong start_slot;
+    ulong end_slot;
+  } repair_test;
+
+  struct {
     char    affinity[ AFFINITY_SZ ];
     uint    tpu_ip;
     uint    rpc_ip;

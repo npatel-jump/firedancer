@@ -579,7 +579,11 @@ static inline void
 handle_new_cluster_contact_info( fd_repair_tile_ctx_t * ctx,
                                  uchar const *          buf,
                                  ulong                  buf_sz ) {
+
+  FD_LOG_HEXDUMP_INFO(("shred contact info", buf, buf_sz));
+
   fd_shred_dest_wire_t const * in_dests = (fd_shred_dest_wire_t const *)fd_type_pun_const( buf );
+  FD_LOG_HEXDUMP_INFO(("destinations", in_dests, sizeof(fd_shred_dest_wire_t)));
 
   ulong dest_cnt = buf_sz;
   if( FD_UNLIKELY( dest_cnt >= MAX_REPAIR_PEERS ) ) {
@@ -587,10 +591,18 @@ handle_new_cluster_contact_info( fd_repair_tile_ctx_t * ctx,
     return;
   }
 
+  FD_LOG_INFO(("pubkey size %lu", sizeof(fd_pubkey_t)));
+
+  // FD_LOG_INFO(("Example pubkey", FD_BASE58_ENC_32_ALLOCA("5jPs1bGU8ZWWpDdkc7cq77ViGjPS4Xb72hkPkJ1jEJM1")));
+
   /* Stop adding peers after we reach the peer max, but we may want to
      consider an eviction policy. */
   for( ulong i=0UL; i<dest_cnt; i++ ) {
    if( FD_UNLIKELY( ctx->repair->peer_cnt >= FD_ACTIVE_KEY_MAX ) ) break;// FIXME: aiming to move all peer tracking out of lib into tile, leaving like this for now
+    FD_LOG_HEXDUMP_INFO(("repair peer", &in_dests[i], sizeof(fd_shred_dest_wire_t)));
+    FD_LOG_HEXDUMP_INFO(("repair peer ip4_addr", &in_dests[i].ip4_addr, sizeof(in_dests[i].ip4_addr)));
+    FD_LOG_HEXDUMP_INFO(("repair peer udp_port", &in_dests[i].udp_port, sizeof(in_dests[i].udp_port)));
+    FD_LOG_HEXDUMP_INFO(("repair peer pubkey", &in_dests[i].pubkey, sizeof(in_dests[i].pubkey)));
     fd_repair_peer_addr_t repair_peer = {
       .addr = in_dests[i].ip4_addr,
       .port = fd_ushort_bswap( in_dests[i].udp_port ),

@@ -13,6 +13,7 @@
 #include "../../disco/fd_disco.h"
 #include "../../util/pod/fd_pod_format.h"
 #include "../replay/fd_exec.h"
+#include "fd_shredcap.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -131,6 +132,13 @@ struct fd_capture_tile_ctx {
 
   fd_alloc_t * alloc;
   uchar contact_info_buffer[ MAX_BUFFER_SIZE ];
+
+  ulong start_slot;
+  ulong end_slot;
+  uint  repair_test;
+
+  /* Repair test context, only used if repair_test is enabled */
+  fd_repair_test_t repair_test_ctx;
 };
 typedef struct fd_capture_tile_ctx fd_capture_tile_ctx_t;
 
@@ -226,6 +234,13 @@ scratch_footprint( fd_topo_tile_t const * tile ) {
   l = FD_LAYOUT_APPEND( l, manifest_spad_max_alloc_align(), fd_spad_footprint( manifest_spad_max_alloc_footprint() ) );
   l = FD_LAYOUT_APPEND( l, shared_spad_max_alloc_align(),   fd_spad_footprint( shared_spad_max_alloc_footprint() ) );
   l = FD_LAYOUT_APPEND( l, fd_alloc_align(),                fd_alloc_footprint() );
+
+  /* RTT tracking pools and maps */
+  l = FD_LAYOUT_APPEND( l, fd_rtt_inflight_pool_align(),    fd_rtt_inflight_pool_footprint( 1024UL ) );
+  l = FD_LAYOUT_APPEND( l, fd_rtt_inflight_map_align(),     fd_rtt_inflight_map_footprint( 1024UL ) );
+  l = FD_LAYOUT_APPEND( l, fd_rtt_measurement_pool_align(), fd_rtt_measurement_pool_footprint( 1024UL ) );
+  l = FD_LAYOUT_APPEND( l, fd_rtt_measurement_map_align(),  fd_rtt_measurement_map_footprint( 1024UL ) );
+
   return FD_LAYOUT_FINI( l, scratch_align() );
 }
 
@@ -435,6 +450,12 @@ after_credit( fd_capture_tile_ctx_t * ctx,
         int parser_err = fd_ssmanifest_parser_consume( parser, buf, buf_sz );
         if( FD_UNLIKELY( parser_err ) ) FD_LOG_ERR(( "fd_ssmanifest_parser_consume failed (%d)", parser_err ));
       } FD_SPAD_FRAME_END;
+
+      if ( ctx->start_slot > 0 ) {
+        FD_LOG_NOTICE(( "start slot %lu", ctx->start_slot ));
+        manifest->slot = ctx->start_slot;
+      }
+
       FD_LOG_NOTICE(( "manifest bank slot %lu", manifest->slot ));
 
       fd_fseq_update( ctx->manifest_wmark, manifest->slot );
@@ -510,6 +531,13 @@ after_frag( fd_capture_tile_ctx_t * ctx,
       ref_tick = shred->data.flags & FD_SHRED_DATA_REF_TICK_MASK;
     }
 
+  /* When running in repair_test mode, treat incoming shreds as repair
+      responses. Since repair_test uses a privileged port in the
+      config, turbine shreds can be safely ignored here. */
+    if( FD_UNLIKELY( ctx->repair_test ) ) {
+      fd_shredcap_repair_test_process_shred( &ctx->repair_test_ctx, slot, idx, is_data, shred, nonce );
+    }
+
     char repair_data_buf[1024];
     snprintf( repair_data_buf, sizeof(repair_data_buf),
              "%u,%u,%ld,%lu,%u,%u,%u,%d,%d,%u\n",
@@ -556,6 +584,17 @@ after_frag( fd_capture_tile_ctx_t * ctx,
       default:
         break;
     }
+
+      /* In repair_test mode, process every outgoing repair request.
+      If this is the first request and the timer hasn't started yet,
+      start the timer. Always increment the outgoing request count for
+      tracking. */
+      if( FD_UNLIKELY( ctx->repair_test && slot != 0UL) ) {
+        if( FD_UNLIKELY( !ctx->repair_test_ctx.repair_timer_started ) ) {
+          fd_shredcap_repair_timer_start( &ctx->repair_test_ctx );
+        }
+        fd_shredcap_repair_request_count( &ctx->repair_test_ctx, slot, protocol.discriminant, nonce, (uint)shred_index );
+      }
 
     char repair_data_buf[1024];
     snprintf( repair_data_buf, sizeof(repair_data_buf),
@@ -699,6 +738,13 @@ unprivileged_init( fd_topo_t *      topo,
   void * manifest_spad_mem          = FD_SCRATCH_ALLOC_APPEND( l, manifest_spad_max_alloc_align(), fd_spad_footprint( manifest_spad_max_alloc_footprint() ) );
   void * shared_spad_mem            = FD_SCRATCH_ALLOC_APPEND( l, shared_spad_max_alloc_align(),   fd_spad_footprint( shared_spad_max_alloc_footprint() ) );
   void * alloc_mem                  = FD_SCRATCH_ALLOC_APPEND( l, fd_alloc_align(),                fd_alloc_footprint() );
+
+  /* RTT tracking pools and maps */
+  void * rtt_inflight_pool_mem      = FD_SCRATCH_ALLOC_APPEND( l, fd_rtt_inflight_pool_align(),    fd_rtt_inflight_pool_footprint( 1024UL ) );
+  void * rtt_inflight_map_mem       = FD_SCRATCH_ALLOC_APPEND( l, fd_rtt_inflight_map_align(),     fd_rtt_inflight_map_footprint( 1024UL ) );
+  void * rtt_measurement_pool_mem   = FD_SCRATCH_ALLOC_APPEND( l, fd_rtt_measurement_pool_align(), fd_rtt_measurement_pool_footprint( 1024UL ) );
+  void * rtt_measurement_map_mem    = FD_SCRATCH_ALLOC_APPEND( l, fd_rtt_measurement_map_align(),  fd_rtt_measurement_map_footprint( 1024UL ) );
+
   FD_SCRATCH_ALLOC_FINI( l, scratch_align() );
 
   /* Input links */
@@ -786,6 +832,40 @@ unprivileged_init( fd_topo_t *      topo,
   FD_TEST( ctx->manifest_exec_slot_ctx->bank );
 
   strncpy( ctx->manifest_path, tile->shredcap.manifest_path, PATH_MAX );
+  FD_LOG_NOTICE(("start_slot %lu", tile->shredcap.start_slot));
+  ctx->start_slot = tile->shredcap.start_slot;
+  ctx->end_slot = tile->shredcap.end_slot;
+  ctx->repair_test = tile->shredcap.repair_test;
+
+  if( FD_UNLIKELY( ctx->repair_test ) ) {
+    ctx->repair_test_ctx.start_slot = ctx->start_slot;
+    ctx->repair_test_ctx.end_slot = ctx->end_slot;
+
+    ulong shred_count_obj_id = fd_pod_queryf_ulong( topo->props, ULONG_MAX, "shred_count" );
+    if( FD_LIKELY( shred_count_obj_id != ULONG_MAX ) ) {
+      ctx->repair_test_ctx.shred_count_fseq = fd_fseq_join( fd_topo_obj_laddr( topo, shred_count_obj_id ) );
+      FD_LOG_NOTICE(( "repair_test enabled: tracking end_slot %lu completion", ctx->end_slot ));
+    } else {
+      FD_LOG_WARNING(( "repair_test enabled but no shred_count fseq found" ));
+      ctx->repair_test_ctx.shred_count_fseq = NULL;
+    }
+    fd_shredcap_end_slot_reset_tracking( &ctx->repair_test_ctx );
+    fd_shredcap_repair_test_init( &ctx->repair_test_ctx );
+
+    /* Initialize RTT tracking pools and maps */
+    ctx->repair_test_ctx.inflight_pool    = fd_rtt_inflight_pool_join( fd_rtt_inflight_pool_new( rtt_inflight_pool_mem, 1024UL ) );
+    ctx->repair_test_ctx.inflight_map     = fd_rtt_inflight_map_join( fd_rtt_inflight_map_new( rtt_inflight_map_mem, 1024UL, 42UL /* seed */ ) );
+    ctx->repair_test_ctx.measurement_pool = fd_rtt_measurement_pool_join( fd_rtt_measurement_pool_new( rtt_measurement_pool_mem, 1024UL ) );
+    ctx->repair_test_ctx.measurement_map  = fd_rtt_measurement_map_join( fd_rtt_measurement_map_new( rtt_measurement_map_mem, 1024UL, 42UL /* seed */ ) );
+
+    if( FD_UNLIKELY( !ctx->repair_test_ctx.inflight_pool || !ctx->repair_test_ctx.inflight_map ||
+                     !ctx->repair_test_ctx.measurement_pool || !ctx->repair_test_ctx.measurement_map ) ) {
+      FD_LOG_ERR(( "Failed to initialize RTT tracking pools and maps" ));
+    }
+
+    FD_LOG_NOTICE(( "repair_test initialized for end_slot %lu with RTT tracking - waiting for repair requests", ctx->end_slot ));
+  }
+
   ctx->manifest_load_done   = 0;
   ctx->manifest_spad_mem    = manifest_spad_mem;
   ctx->manifest_spad        = fd_spad_join( fd_spad_new( ctx->manifest_spad_mem, manifest_spad_max_alloc_footprint() ) );

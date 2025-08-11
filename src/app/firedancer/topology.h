@@ -48,6 +48,22 @@ setup_topo_txncache( fd_topo_t *  topo,
                      ulong        max_live_slots,
                      ulong        max_txn_per_slot );
 
+/* Network resolution utilities */
+int
+resolve_address( char const * address,
+                 uint       * ip_addr );
+
+int
+resolve_gossip_entrypoint( char const *    host_port,
+                           fd_ip4_port_t * ip4_port );
+
+void
+resolve_gossip_entrypoints( config_t * config );
+
+/* Topology setup utilities */
+fd_topo_obj_t *
+setup_topo_fec_sets( fd_topo_t * topo, char const * wksp_name, ulong sz );
+
 int
 fd_topo_configure_tile( fd_topo_tile_t * tile,
                         fd_config_t *    config );

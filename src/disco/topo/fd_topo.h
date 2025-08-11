@@ -467,6 +467,9 @@ struct fd_topo_tile {
       ulong   write_buffer_size; /* Size of the write buffer for the capture tile */
       int    enable_publish_stake_weights;
       char   manifest_path[ PATH_MAX ];
+      ulong  start_slot;
+      ulong  end_slot;
+      uint    repair_test;
 
       /* Set internally by the capture tile */
       int shreds_fd;

@@ -37,7 +37,7 @@ setup_topo_banks( fd_topo_t *  topo,
   return obj;
 }
 
-static fd_topo_obj_t *
+fd_topo_obj_t *
 setup_topo_fec_sets( fd_topo_t * topo, char const * wksp_name, ulong sz ) {
   fd_topo_obj_t * obj = fd_topob_obj( topo, "fec_sets", wksp_name );
   FD_TEST( fd_pod_insertf_ulong( topo->props, sz, "obj.%lu.sz",   obj->id ) );
@@ -107,7 +107,7 @@ setup_topo_txncache( fd_topo_t *  topo,
   return obj;
 }
 
-static int
+int
 resolve_address( char const * address,
                  uint       * ip_addr ) {
   struct addrinfo hints = { .ai_family = AF_INET };
@@ -131,7 +131,7 @@ resolve_address( char const * address,
   return resolved;
 }
 
-static int
+int
 resolve_gossip_entrypoint( char const *    host_port,
                            fd_ip4_port_t * ip4_port ) {
 
@@ -165,7 +165,7 @@ resolve_gossip_entrypoint( char const *    host_port,
   return resolved;
 }
 
-static void
+void
 resolve_gossip_entrypoints( config_t * config ) {
   ulong entrypoint_cnt = config->gossip.entrypoints_cnt;
   ulong resolved_entrypoints = 0UL;
@@ -1091,6 +1091,8 @@ fd_topo_configure_tile( fd_topo_tile_t * tile,
       tile->shredcap.write_buffer_size = config->tiles.shredcap.write_buffer_size;
       tile->shredcap.enable_publish_stake_weights = 0; /* this is not part of the config */
       strncpy( tile->shredcap.manifest_path, "", PATH_MAX ); /* this is not part of the config */
+    } else if( FD_UNLIKELY( !strcmp( tile->name, "rprtst" ) ) ) {
+      /* No configuration needed for rprtst test tile */
     } else {
       return 0;
     }

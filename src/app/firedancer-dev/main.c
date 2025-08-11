@@ -90,6 +90,7 @@ extern fd_topo_run_tile_t fd_tile_ipecho;
 
 extern fd_topo_run_tile_t fd_tile_gossip;
 extern fd_topo_run_tile_t fd_tile_repair;
+extern fd_topo_run_tile_t fd_tile_rprtst;
 extern fd_topo_run_tile_t fd_tile_replay;
 extern fd_topo_run_tile_t fd_tile_execor;
 extern fd_topo_run_tile_t fd_tile_writer;
@@ -128,6 +129,7 @@ fd_topo_run_tile_t * TILES[] = {
   &fd_tile_bundle,
   &fd_tile_gossip,
   &fd_tile_repair,
+  &fd_tile_rprtst,
   &fd_tile_replay,
   &fd_tile_execor,
   &fd_tile_writer,
@@ -181,6 +183,7 @@ extern action_t fd_action_sim;
 extern action_t fd_action_backtest;
 extern action_t fd_action_snapshot_load;
 extern action_t fd_action_repair;
+extern action_t fd_action_repair_test;
 extern action_t fd_action_shred_version;
 extern action_t fd_action_ipecho_server;
 
@@ -212,6 +215,7 @@ action_t * ACTIONS[] = {
   &fd_action_backtest,
   &fd_action_snapshot_load,
   &fd_action_repair,
+  &fd_action_repair_test,
   &fd_action_shred_version,
   &fd_action_ipecho_server,
   NULL,
